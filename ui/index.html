@@ -204,6 +204,9 @@
       }
       partialEl.textContent = data.partial_text || '';
       backlogHintEl.textContent = data.backlog_hint || '-';
+      if (data.asr_error) {
+        log(`ASR warning seq=${currentSeq}: ${data.asr_error}`);
+      }
       log(`chunk ok seq=${currentSeq}`, data.audio_metrics || {});
       seq += 1;
       seqEl.textContent = String(seq);
