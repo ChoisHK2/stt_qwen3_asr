@@ -4,6 +4,7 @@ import base64
 import json
 
 from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.staticfiles import StaticFiles
 
 from api.schemas import FinalizePayload, StartPayload
 from core.config import get_settings
@@ -12,6 +13,7 @@ from storage.redis_store import RedisStore
 
 app = FastAPI(title="GPU STT Service")
 settings = get_settings()
+app.mount("/ui", StaticFiles(directory="ui", html=True), name="ui")
 
 
 @app.on_event("startup")
