@@ -36,3 +36,10 @@ A.
 
 ## Q11. 성능 튜닝 포인트는?
 A. `WORKER_CONCURRENCY`, `GLOBAL_QUEUE_LIMIT`, chunk 2s vs 4s, noise mode FAST/QUALITY, vLLM `--max-num-seqs`를 함께 조정하세요. 지연 최적화는 2s+낮은 동시성, 처리량 최적화는 4s+큐 확장이 유리합니다.
+
+## Q12. AMD(ROCm)에서 테스트하고, 배포는 NVIDIA(CUDA)로 해도 되나요?
+A. 네, 권장되는 접근입니다. API/worker 이미지는 공통으로 유지하고, vLLM 런타임 이미지만 GPU 스택별(ROCm/CUDA)로 분리하세요.
+- 로컬(ROCm): 기능 검증(WS/REST, 세션 복구, 백프레셔, selftest)
+- 오프라인 서버(CUDA): 실성능/실운영 검증
+주의: 성능 지표(지연/처리량)는 ROCm과 CUDA가 다르므로 최종 튜닝은 반드시 CUDA(MIG)에서 재측정해야 합니다.
+

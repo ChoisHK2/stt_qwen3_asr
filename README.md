@@ -83,6 +83,35 @@ docker run --rm --gpus all -p 8001:8001 -v $(pwd)/models:/models \
   --host 0.0.0.0 --port 8001 --max-num-seqs 8
 ```
 
+## ROCm 로컬 테스트 + CUDA 오프라인 운영 전략 (권장)
+결론부터 말하면 **가능하고, 오히려 권장되는 방식**입니다.
+
+- 개인 PC(AMD/ROCm):
+  - 목적: API 흐름, 세션/큐/복구, 전처리, selftest, smoke 검증
+  - vLLM은 ROCm 지원 이미지/환경으로 별도 실행(또는 GPU 없으면 selftest 중심)
+- 오프라인 서버(NVIDIA/CUDA):
+  - 목적: 실운영 추론
+  - CUDA 기반 vLLM 이미지로 고정 배포
+
+핵심은 **애플리케이션(API/worker) 이미지와 vLLM 런타임 이미지를 분리**하는 것입니다.
+이 저장소의 `api`/`worker` 컨테이너는 Python 서비스 로직이므로 CUDA/ROCm에 강하게 결합되지 않고,
+실제 GPU 종속성은 vLLM 컨테이너가 담당합니다.
+
+### 운영 권장안
+1. 온라인 PC에서 공통 산출물 준비
+   - `./scripts/download_models.sh ./models`
+   - `gpu-stt`(api/worker) 이미지 빌드+tar export
+2. 개인 PC(ROCm)에서 사전검증
+   - 가능하면 ROCm용 vLLM으로 `/v1/audio/transcriptions` 응답 확인
+   - 어려우면 `/v1/selftest/*` + WS/REST ingest/finalize smoke로 기능 검증
+3. 오프라인 서버(CUDA) 배포
+   - CUDA vLLM 이미지 + 동일한 `models/` + 동일한 api/worker 이미지 사용
+
+### 주의사항
+- ROCm에서 통과한 성능 수치(지연/처리량)를 CUDA에 그대로 대입하면 오차가 큽니다.
+- 따라서 성능튜닝은 반드시 최종 CUDA(MIG) 환경에서 재측정하세요.
+- 기능 검증(프로토콜/복구/큐/품질지표)은 ROCm에서도 충분히 선행 가능합니다.
+
 ## 로컬 실행
 ```bash
 cp .env.example .env
@@ -101,6 +130,8 @@ curl localhost:8000/__ping
 docker build -t gpu-stt:latest .
 docker save gpu-stt:latest -o gpu-stt.tar
 ```
+> 참고: 위 `gpu-stt:latest`는 API/worker 서비스 이미지입니다. vLLM 이미지는 대상 GPU 스택(CUDA/ROCm)에 맞는 태그를 별도로 관리하세요.
+
 2. `gpu-stt.tar` + `models/`를 오프라인 GPU 서버로 이동
 3. 서버에서 import
 ```bash
