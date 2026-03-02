@@ -5,11 +5,10 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg git curl && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml /app/
-RUN pip install --no-cache-dir -U pip && pip install --no-cache-dir .
+COPY requirements.txt /app/
+RUN pip install --no-cache-dir -U pip && pip install --no-cache-dir -r requirements.txt
 
 COPY . /app
-RUN pip install --no-cache-dir .
 
 ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["api"]
