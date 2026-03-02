@@ -25,6 +25,7 @@ class Settings:
     vllm_model: str = "Qwen/Qwen3-ASR-1.7B"
     asr_timeout_sec: int = 20
     pyannote_model: str = "pyannote/speaker-diarization-community-1"
+    pyannote_local_path: str = "/models/pyannote-speaker-diarization-community-1"
     pyannote_token: str | None = None
     matching_fallback: str = "segment_majority"
     overlap_policy: str = "dominant"
@@ -64,6 +65,7 @@ def get_settings() -> Settings:
         vllm_model=os.getenv("VLLM_MODEL", "Qwen/Qwen3-ASR-1.7B"),
         asr_timeout_sec=int(os.getenv("ASR_TIMEOUT_SEC", "20")),
         pyannote_model=os.getenv("PYANNOTE_MODEL", "pyannote/speaker-diarization-community-1"),
+        pyannote_local_path=os.getenv("PYANNOTE_LOCAL_PATH", "/models/pyannote-speaker-diarization-community-1"),
         pyannote_token=os.getenv("PYANNOTE_TOKEN") or None,
         matching_fallback=os.getenv("MATCHING_FALLBACK", "segment_majority"),
         overlap_policy=os.getenv("OVERLAP_POLICY", "dominant"),

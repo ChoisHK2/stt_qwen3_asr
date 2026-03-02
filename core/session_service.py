@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import wave
 from typing import Any
 
@@ -122,16 +123,27 @@ class SessionService:
 
         diarization = []
         diarization_status = "skipped"
-        if self.settings.pyannote_token:
+        diarization_source = None
+
+        if os.path.isdir(self.settings.pyannote_local_path):
+            diarization_source = self.settings.pyannote_local_path
+        elif self.settings.pyannote_token:
+            diarization_source = self.settings.pyannote_model
+
+        if diarization_source:
             try:
-                self.diar.load(self.settings.pyannote_model, self.settings.pyannote_token)
+                token = self.settings.pyannote_token if diarization_source == self.settings.pyannote_model else None
+                self.diar.load(diarization_source, token)
                 diarization = [d.__dict__ for d in self.diar.diarize(wav_path)]
-                diarization_status = "ok"
+                diarization_status = f"ok: {diarization_source}"
             except Exception as exc:
                 diarization_status = f"failed: {exc}"
                 diarization = []
         else:
-            diarization_status = "skipped: PYANNOTE_TOKEN not set"
+            diarization_status = (
+                "skipped: no local diarization model and PYANNOTE_TOKEN not set "
+                f"(expected local path: {self.settings.pyannote_local_path})"
+            )
 
         from core.models import ASRSegment, DiarTurn
 
@@ -144,5 +156,8 @@ class SessionService:
             "timeline": timeline,
             "full_text": " ".join(s["text"] for s in segments).strip(),
             "diarization": diarization,
-            "meta": {"matching_fallback": self.settings.matching_fallback, "diarization_status": diarization_status},
+            "meta": {
+                "matching_fallback": self.settings.matching_fallback,
+                "diarization_status": diarization_status,
+            },
         }

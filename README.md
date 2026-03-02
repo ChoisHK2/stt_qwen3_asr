@@ -139,10 +139,14 @@ http://localhost:8000/ui
 - `/v1/selftest/diarization`: pyannote 파이프라인 로드 체크
 - `/v1/selftest/pipeline`: 전처리~파이프라인 스모크 경로 확인
 
-## diarization 토큰 관련
-- 기본값에서는 `PYANNOTE_TOKEN`이 없으면 diarization을 자동으로 건너뜁니다(로그 경고 스팸 방지 목적).
-- finalize 응답의 `meta.diarization_status` 필드에서 `ok | skipped | failed` 상태를 확인할 수 있습니다.
-- 화자 분리가 필요하면 `.env`에 `PYANNOTE_TOKEN=hf_xxx`를 설정하고, 사전 라이선스 동의가 필요한 모델 조건을 먼저 승인하세요.
+## diarization 토큰/오프라인 운영
+- diarization을 없앤 것이 아니라, **로컬 모델이 있으면 토큰 없이 오프라인으로 동작**하도록 했습니다.
+- 권장 절차는 다음과 같습니다.
+  1. 온라인 PC에서 1회 라이선스 동의 + 토큰 발급
+  2. `PYANNOTE_TOKEN=hf_xxx ./scripts/download_models.sh ./models` 실행
+  3. 생성된 `./models/pyannote-speaker-diarization-community-1` 폴더를 오프라인 서버로 함께 이관
+- 런타임에는 `PYANNOTE_LOCAL_PATH`가 존재하면 해당 로컬 경로를 우선 사용합니다.
+- 로컬 경로가 없고 토큰도 없으면 diarization은 skip되며, finalize 응답 `meta.diarization_status`에서 원인을 확인할 수 있습니다.
 
 ## 오프라인 배포
 1. 온라인 PC에서 이미지 빌드 및 export
