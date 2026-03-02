@@ -114,10 +114,39 @@ docker compose up -d --build
 curl localhost:8000/__ping
 ```
 
+
+## 브라우저 UI 테스트 (마이크/시스템 오디오)
+`/ui` 경로에 간단한 테스트 UI가 포함되어 있어 브라우저에서 바로 입력/결과를 검증할 수 있습니다.
+
+1. 서비스 기동
+```bash
+docker compose up -d --build
+```
+2. 브라우저 접속
+```text
+http://localhost:8000/ui
+```
+3. UI에서 확인
+- 입력 소스: `마이크` 또는 `시스템 오디오(화면 공유)` 선택
+- `녹음 시작` 클릭 → chunk 단위 partial 결과 확인
+- `녹음 중지 + finalize` 클릭 → final 결과 확인
+- 필요 시 `API Base`를 원격 서버 주소(`http://<server-ip>:8000`)로 변경해 원격 API 연결 테스트
+
+> 참고: 시스템 오디오는 브라우저/OS 정책에 따라 `화면 공유 + 오디오 공유`를 허용해야 캡처됩니다.
+
 ## 개인 PC Self-test
 - `/v1/selftest/model`: import/모델 로드 가능성 확인, GPU 없으면 graceful degrade
 - `/v1/selftest/diarization`: pyannote 파이프라인 로드 체크
 - `/v1/selftest/pipeline`: 전처리~파이프라인 스모크 경로 확인
+
+## diarization 토큰/오프라인 운영
+- diarization을 없앤 것이 아니라, **로컬 모델이 있으면 토큰 없이 오프라인으로 동작**하도록 했습니다.
+- 권장 절차는 다음과 같습니다.
+  1. 온라인 PC에서 1회 라이선스 동의 + 토큰 발급
+  2. `PYANNOTE_TOKEN=hf_xxx ./scripts/download_models.sh ./models` 실행
+  3. 생성된 `./models/pyannote-speaker-diarization-community-1` 폴더를 오프라인 서버로 함께 이관
+- 런타임에는 `PYANNOTE_LOCAL_PATH`가 존재하면 해당 로컬 경로를 우선 사용합니다.
+- 로컬 경로가 없고 토큰도 없으면 diarization은 skip되며, finalize 응답 `meta.diarization_status`에서 원인을 확인할 수 있습니다.
 
 ## 오프라인 배포
 1. 온라인 PC에서 이미지 빌드 및 export
@@ -125,7 +154,7 @@ curl localhost:8000/__ping
 docker build -t gpu-stt:latest .
 docker save gpu-stt:latest -o gpu-stt.tar
 ```
-> 참고: 위 `gpu-stt:latest`는 API/worker 서비스 이미지입니다. vLLM 이미지는 대상 GPU 스택(CUDA/ROCm)에 맞는 태그를 별도로 관리하세요.
+> 참고: 위 `gpu-stt:latest`는 API/worker + `/ui` 정적 페이지를 함께 포함한 이미지입니다. vLLM 이미지는 대상 GPU 스택(CUDA/ROCm)에 맞는 태그를 별도로 관리하세요.
 
 2. `gpu-stt.tar` + `models/`를 오프라인 GPU 서버로 이동
 3. 서버에서 import

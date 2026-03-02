@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 
 from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.staticfiles import StaticFiles
 
 from api.schemas import FinalizePayload, StartPayload
 from core.config import get_settings
@@ -12,6 +14,7 @@ from storage.redis_store import RedisStore
 
 app = FastAPI(title="GPU STT Service")
 settings = get_settings()
+app.mount("/ui", StaticFiles(directory="ui", html=True), name="ui")
 
 
 @app.on_event("startup")
@@ -69,13 +72,29 @@ async def selftest_model():
 @app.get("/v1/selftest/diarization")
 async def selftest_diarization():
     details = {"load": "not-run"}
+    local_exists = os.path.isdir(settings.pyannote_local_path)
+    source = settings.pyannote_local_path if local_exists else settings.pyannote_model
+    token = settings.pyannote_token if not local_exists else None
+
+    if not local_exists and not settings.pyannote_token:
+        return {
+            "ok": False,
+            "details": {
+                "load": "skipped",
+                "reason": "no local diarization model and PYANNOTE_TOKEN not set",
+                "expected_local_path": settings.pyannote_local_path,
+            },
+        }
+
     try:
-        app.state.session_service.diar.load(settings.pyannote_model, settings.pyannote_token)
+        app.state.session_service.diar.load(source, token)
         details["load"] = "ok"
+        details["source"] = source
         ok = True
     except Exception as exc:
         ok = False
         details["load"] = f"graceful-fail: {exc}"
+        details["source"] = source
     return {"ok": ok, "details": details}
 
 

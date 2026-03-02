@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import io
+import os
 import wave
 from typing import Any
 
@@ -76,8 +76,9 @@ class SessionService:
             },
         )
 
+        asr_error = None
         if self.settings.partial_mode == "on":
-            segs = await self.asr.transcribe_partial(audio, sample_rate)
+            segs, asr_error = await self.asr.transcribe_partial(audio, sample_rate)
             partial_text = " ".join(s.text for s in segs).strip()
             await self.store.append_partial(
                 ssid, {"seq": seq, "text": partial_text, "segments": [s.__dict__ for s in segs]}
@@ -85,12 +86,15 @@ class SessionService:
         else:
             partial_text = ""
 
-        return {
+        response = {
             "accepted_seq": seq,
             "backlog_hint": backlog_hint,
             "partial_text": partial_text,
             "audio_metrics": metrics.__dict__,
         }
+        if self.settings.partial_mode == "on" and asr_error:
+            response["asr_error"] = asr_error
+        return response
 
     async def status(self, ssid: str) -> dict[str, Any]:
         st = await self.store.get_status(ssid)
@@ -118,11 +122,28 @@ class SessionService:
             w.writeframes((full_audio * 32767).astype("<i2").tobytes())
 
         diarization = []
-        try:
-            self.diar.load(self.settings.pyannote_model, self.settings.pyannote_token)
-            diarization = [d.__dict__ for d in self.diar.diarize(wav_path)]
-        except Exception:
-            diarization = []
+        diarization_status = "skipped"
+        diarization_source = None
+
+        if os.path.isdir(self.settings.pyannote_local_path):
+            diarization_source = self.settings.pyannote_local_path
+        elif self.settings.pyannote_token:
+            diarization_source = self.settings.pyannote_model
+
+        if diarization_source:
+            try:
+                token = self.settings.pyannote_token if diarization_source == self.settings.pyannote_model else None
+                self.diar.load(diarization_source, token)
+                diarization = [d.__dict__ for d in self.diar.diarize(wav_path)]
+                diarization_status = f"ok: {diarization_source}"
+            except Exception as exc:
+                diarization_status = f"failed: {exc}"
+                diarization = []
+        else:
+            diarization_status = (
+                "skipped: no local diarization model and PYANNOTE_TOKEN not set "
+                f"(expected local path: {self.settings.pyannote_local_path})"
+            )
 
         from core.models import ASRSegment, DiarTurn
 
@@ -135,5 +156,8 @@ class SessionService:
             "timeline": timeline,
             "full_text": " ".join(s["text"] for s in segments).strip(),
             "diarization": diarization,
-            "meta": {"matching_fallback": self.settings.matching_fallback},
+            "meta": {
+                "matching_fallback": self.settings.matching_fallback,
+                "diarization_status": diarization_status,
+            },
         }
