@@ -76,26 +76,21 @@ WAS는 chunk를 그대로 프록시하고, GPU 서버가 세션/큐/전처리/pa
 
 ## vLLM 실행 예시
 ```bash
-docker run --rm --gpus all -p 8001:8001 -v $(pwd)/models:/models \
+docker run --rm --gpus all -p 8001:8001 \
+  -e HF_HUB_OFFLINE=1 \
+  -e TRANSFORMERS_OFFLINE=1 \
+  -e HF_DATASETS_OFFLINE=1 \
+  -v $(pwd)/models:/models \
   vllm/vllm-openai:latest \
-  --model /models/Qwen3-ASR-1.7B \
+  /models/Qwen3-ASR-1.7B \
   --served-model-name Qwen/Qwen3-ASR-1.7B \
-  --host 0.0.0.0 --port 8001 --max-num-seqs 8
+  --host 0.0.0.0 --port 8001 \
+  --gpu-memory-utilization 0.80 \
+  --max-model-len 4096 \
+  --max-num-seqs 1 \
+  --max-num-batched-tokens 512 \
+  --enforce-eager
 ```
-
-## ROCm 로컬 테스트 + CUDA 오프라인 운영 전략 (권장)
-결론부터 말하면 **가능하고, 오히려 권장되는 방식**입니다.
-
-- 개인 PC(AMD/ROCm):
-  - 목적: API 흐름, 세션/큐/복구, 전처리, selftest, smoke 검증
-  - vLLM은 ROCm 지원 이미지/환경으로 별도 실행(또는 GPU 없으면 selftest 중심)
-- 오프라인 서버(NVIDIA/CUDA):
-  - 목적: 실운영 추론
-  - CUDA 기반 vLLM 이미지로 고정 배포
-
-핵심은 **애플리케이션(API/worker) 이미지와 vLLM 런타임 이미지를 분리**하는 것입니다.
-이 저장소의 `api`/`worker` 컨테이너는 Python 서비스 로직이므로 CUDA/ROCm에 강하게 결합되지 않고,
-실제 GPU 종속성은 vLLM 컨테이너가 담당합니다.
 
 ### 운영 권장안
 1. 온라인 PC에서 공통 산출물 준비
