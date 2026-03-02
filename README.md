@@ -139,6 +139,11 @@ http://localhost:8000/ui
 - `/v1/selftest/diarization`: pyannote 파이프라인 로드 체크
 - `/v1/selftest/pipeline`: 전처리~파이프라인 스모크 경로 확인
 
+## diarization 토큰 관련
+- 기본값에서는 `PYANNOTE_TOKEN`이 없으면 diarization을 자동으로 건너뜁니다(로그 경고 스팸 방지 목적).
+- finalize 응답의 `meta.diarization_status` 필드에서 `ok | skipped | failed` 상태를 확인할 수 있습니다.
+- 화자 분리가 필요하면 `.env`에 `PYANNOTE_TOKEN=hf_xxx`를 설정하고, 사전 라이선스 동의가 필요한 모델 조건을 먼저 승인하세요.
+
 ## 오프라인 배포
 1. 온라인 PC에서 이미지 빌드 및 export
 ```bash
