@@ -2,3 +2,4 @@
 # Python cache/binaries
 __pycache__/
 *.pyc
+models/
