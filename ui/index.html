@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GPU STT 테스트 UI</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 980px; margin: 24px auto; padding: 0 16px; line-height: 1.4; }
+    h1 { margin-bottom: 8px; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; margin: 10px 0; }
+    .card { border: 1px solid #ddd; border-radius: 8px; padding: 14px; margin: 12px 0; }
+    label { font-weight: 600; margin-right: 8px; }
+    input, select, button { padding: 8px; }
+    button { cursor: pointer; }
+    button:disabled { cursor: not-allowed; opacity: 0.6; }
+    #log, #partial, #final { width: 100%; min-height: 110px; padding: 10px; border: 1px solid #ddd; border-radius: 6px; background: #fafafa; overflow: auto; white-space: pre-wrap; }
+    .hint { color: #555; font-size: 0.92em; }
+  </style>
+</head>
+<body>
+  <h1>GPU STT 간이 테스트 UI</h1>
+  <p class="hint">마이크 / 시스템 오디오를 REST API로 chunk 전송해 partial/final 결과를 확인합니다.</p>
+
+  <div class="card">
+    <div class="row">
+      <div>
+        <label for="apiBase">API Base</label>
+        <input id="apiBase" value="" placeholder="기본: 현재 origin" size="30" />
+      </div>
+      <div>
+        <label for="chunkSec">Chunk(sec)</label>
+        <select id="chunkSec">
+          <option value="1">1</option>
+          <option value="2" selected>2</option>
+          <option value="4">4</option>
+        </select>
+      </div>
+      <div>
+        <label for="sampleRate">Sample Rate</label>
+        <select id="sampleRate">
+          <option value="16000" selected>16000</option>
+          <option value="24000">24000</option>
+          <option value="48000">48000</option>
+        </select>
+      </div>
+      <div>
+        <label for="sourceType">입력 소스</label>
+        <select id="sourceType">
+          <option value="mic" selected>마이크</option>
+          <option value="system">시스템 오디오(화면 공유)</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="row">
+      <button id="btnStart">녹음 시작</button>
+      <button id="btnStop" disabled>녹음 중지 + finalize</button>
+      <button id="btnStatus" disabled>상태 조회</button>
+    </div>
+
+    <div class="row hint">
+      <div>SSID: <span id="ssid">-</span></div>
+      <div>SEQ: <span id="seq">0</span></div>
+      <div>Backlog Hint: <span id="backlogHint">-</span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Partial</h3>
+    <div id="partial"></div>
+  </div>
+
+  <div class="card">
+    <h3>Final</h3>
+    <div id="final"></div>
+  </div>
+
+  <div class="card">
+    <h3>Log</h3>
+    <div id="log"></div>
+  </div>
+
+<script>
+(() => {
+  const apiBaseEl = document.getElementById('apiBase');
+  const chunkSecEl = document.getElementById('chunkSec');
+  const sampleRateEl = document.getElementById('sampleRate');
+  const sourceTypeEl = document.getElementById('sourceType');
+  const btnStart = document.getElementById('btnStart');
+  const btnStop = document.getElementById('btnStop');
+  const btnStatus = document.getElementById('btnStatus');
+  const ssidEl = document.getElementById('ssid');
+  const seqEl = document.getElementById('seq');
+  const backlogHintEl = document.getElementById('backlogHint');
+  const partialEl = document.getElementById('partial');
+  const finalEl = document.getElementById('final');
+  const logEl = document.getElementById('log');
+
+  let mediaStream;
+  let audioCtx;
+  let sourceNode;
+  let processor;
+  let timer;
+  let sampleBuffer = [];
+  let ssid = null;
+  let seq = 0;
+  let uploading = false;
+
+  function apiBase() {
+    return (apiBaseEl.value || window.location.origin).replace(/\/$/, '');
+  }
+
+  function log(msg, obj) {
+    const time = new Date().toLocaleTimeString();
+    const text = obj ? `${msg} ${JSON.stringify(obj)}` : msg;
+    logEl.textContent = `[${time}] ${text}\n` + logEl.textContent;
+  }
+
+  function floatToPcm16Bytes(float32Array) {
+    const out = new Int16Array(float32Array.length);
+    for (let i = 0; i < float32Array.length; i++) {
+      let s = Math.max(-1, Math.min(1, float32Array[i]));
+      out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+    }
+    return new Uint8Array(out.buffer);
+  }
+
+  async function createSession() {
+    const payload = {
+      sample_rate: Number(sampleRateEl.value),
+      channels: 1,
+      chunk_sec: Number(chunkSecEl.value)
+    };
+    const res = await fetch(`${apiBase()}/v1/sessions/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+      throw new Error(`세션 생성 실패: HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    ssid = data.ssid;
+    ssidEl.textContent = ssid;
+    log('session created', data);
+  }
+
+  async function getInputStream() {
+    if (sourceTypeEl.value === 'system') {
+      return await navigator.mediaDevices.getDisplayMedia({ audio: true, video: true });
+    }
+    return await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        sampleRate: Number(sampleRateEl.value),
+        echoCancellation: false,
+        noiseSuppression: false,
+      }
+    });
+  }
+
+  function installAudioPipeline() {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)({
+      sampleRate: Number(sampleRateEl.value)
+    });
+    sourceNode = audioCtx.createMediaStreamSource(mediaStream);
+    processor = audioCtx.createScriptProcessor(4096, 1, 1);
+    sourceNode.connect(processor);
+    processor.connect(audioCtx.destination);
+
+    processor.onaudioprocess = (e) => {
+      const input = e.inputBuffer.getChannelData(0);
+      sampleBuffer.push(new Float32Array(input));
+    };
+  }
+
+  function flushChunk() {
+    if (!ssid || uploading || sampleBuffer.length === 0) return;
+
+    const length = sampleBuffer.reduce((acc, cur) => acc + cur.length, 0);
+    const merged = new Float32Array(length);
+    let offset = 0;
+    for (const part of sampleBuffer) {
+      merged.set(part, offset);
+      offset += part.length;
+    }
+    sampleBuffer = [];
+
+    const bytes = floatToPcm16Bytes(merged);
+    const blob = new Blob([bytes], { type: 'application/octet-stream' });
+    const formData = new FormData();
+    formData.append('file', blob, `chunk_${seq}.pcm`);
+
+    const currentSeq = seq;
+    uploading = true;
+    fetch(`${apiBase()}/v1/sessions/${ssid}/chunk?seq=${currentSeq}`, {
+      method: 'POST',
+      body: formData
+    })
+    .then(async (res) => {
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(`chunk 실패 seq=${currentSeq}: ${res.status} ${JSON.stringify(data)}`);
+      }
+      partialEl.textContent = data.partial_text || '';
+      backlogHintEl.textContent = data.backlog_hint || '-';
+      log(`chunk ok seq=${currentSeq}`, data.audio_metrics || {});
+      seq += 1;
+      seqEl.textContent = String(seq);
+    })
+    .catch((e) => {
+      log(e.message);
+    })
+    .finally(() => {
+      uploading = false;
+    });
+  }
+
+  async function finalize() {
+    if (!ssid) return;
+    const res = await fetch(`${apiBase()}/v1/sessions/${ssid}/finalize`, { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(`finalize 실패: HTTP ${res.status} ${JSON.stringify(data)}`);
+    }
+    finalEl.textContent = JSON.stringify(data, null, 2);
+    log('finalize', data);
+  }
+
+  async function queryStatus() {
+    if (!ssid) return;
+    const res = await fetch(`${apiBase()}/v1/sessions/${ssid}/status`);
+    const data = await res.json();
+    log('status', data);
+  }
+
+  async function start() {
+    try {
+      await createSession();
+      seq = 0;
+      seqEl.textContent = '0';
+      partialEl.textContent = '';
+      finalEl.textContent = '';
+
+      mediaStream = await getInputStream();
+      installAudioPipeline();
+      timer = setInterval(flushChunk, Number(chunkSecEl.value) * 1000);
+
+      btnStart.disabled = true;
+      btnStop.disabled = false;
+      btnStatus.disabled = false;
+      log('recording started');
+    } catch (e) {
+      log(`start 실패: ${e.message}`);
+      await stop(false);
+    }
+  }
+
+  async function stop(withFinalize = true) {
+    if (timer) clearInterval(timer);
+    timer = null;
+
+    flushChunk();
+
+    if (processor) processor.disconnect();
+    if (sourceNode) sourceNode.disconnect();
+    if (audioCtx) await audioCtx.close();
+    if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
+
+    processor = null;
+    sourceNode = null;
+    audioCtx = null;
+    mediaStream = null;
+
+    btnStart.disabled = false;
+    btnStop.disabled = true;
+
+    if (withFinalize) {
+      try {
+        await new Promise(r => setTimeout(r, 300));
+        await finalize();
+      } catch (e) {
+        log(`finalize 실패: ${e.message}`);
+      }
+    }
+  }
+
+  btnStart.addEventListener('click', start);
+  btnStop.addEventListener('click', () => stop(true));
+  btnStatus.addEventListener('click', queryStatus);
+})();
+</script>
+</body>
+</html>

@@ -114,6 +114,26 @@ docker compose up -d --build
 curl localhost:8000/__ping
 ```
 
+
+## 브라우저 UI 테스트 (마이크/시스템 오디오)
+`/ui` 경로에 간단한 테스트 UI가 포함되어 있어 브라우저에서 바로 입력/결과를 검증할 수 있습니다.
+
+1. 서비스 기동
+```bash
+docker compose up -d --build
+```
+2. 브라우저 접속
+```text
+http://localhost:8000/ui
+```
+3. UI에서 확인
+- 입력 소스: `마이크` 또는 `시스템 오디오(화면 공유)` 선택
+- `녹음 시작` 클릭 → chunk 단위 partial 결과 확인
+- `녹음 중지 + finalize` 클릭 → final 결과 확인
+- 필요 시 `API Base`를 원격 서버 주소(`http://<server-ip>:8000`)로 변경해 원격 API 연결 테스트
+
+> 참고: 시스템 오디오는 브라우저/OS 정책에 따라 `화면 공유 + 오디오 공유`를 허용해야 캡처됩니다.
+
 ## 개인 PC Self-test
 - `/v1/selftest/model`: import/모델 로드 가능성 확인, GPU 없으면 graceful degrade
 - `/v1/selftest/diarization`: pyannote 파이프라인 로드 체크
@@ -125,7 +145,7 @@ curl localhost:8000/__ping
 docker build -t gpu-stt:latest .
 docker save gpu-stt:latest -o gpu-stt.tar
 ```
-> 참고: 위 `gpu-stt:latest`는 API/worker 서비스 이미지입니다. vLLM 이미지는 대상 GPU 스택(CUDA/ROCm)에 맞는 태그를 별도로 관리하세요.
+> 참고: 위 `gpu-stt:latest`는 API/worker + `/ui` 정적 페이지를 함께 포함한 이미지입니다. vLLM 이미지는 대상 GPU 스택(CUDA/ROCm)에 맞는 태그를 별도로 관리하세요.
 
 2. `gpu-stt.tar` + `models/`를 오프라인 GPU 서버로 이동
 3. 서버에서 import
