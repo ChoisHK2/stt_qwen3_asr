@@ -24,8 +24,6 @@ services:
       - "4096"
       - --max-num-seqs
       - "1"
-      - --max-num-batched-tokens
-      - "512"
       - --enforce-eager
     ports:
       - "8001:8001"

@@ -27,18 +27,20 @@ class DummyClient:
     async def __aexit__(self, exc_type, exc, tb):
         return False
 
-    async def post(self, url, data=None, files=None):
+    async def post(self, url, json=None, **kwargs):
         self.capture["url"] = url
-        self.capture["data"] = data
-        self.capture["files"] = files
+        self.capture["json"] = json
         return DummyResponse(self.payload)
 
 
-def test_transcribe_partial_uses_multipart_and_parses_segments(monkeypatch):
+def test_transcribe_partial_uses_chat_completions_and_parses_response(monkeypatch):
     capture = {}
 
     def fake_client(*args, **kwargs):
-        return DummyClient({"segments": [{"start": 0.0, "end": 1.0, "text": "hello"}]}, capture)
+        return DummyClient(
+            {"choices": [{"message": {"content": "hello"}}]},
+            capture,
+        )
 
     monkeypatch.setattr("clients.asr_client.httpx.AsyncClient", fake_client)
     cli = ASRClient()
@@ -49,5 +51,9 @@ def test_transcribe_partial_uses_multipart_and_parses_segments(monkeypatch):
     assert err is None
     assert len(segs) == 1
     assert segs[0].text == "hello"
-    assert capture["data"]["response_format"] == "verbose_json"
-    assert "file" in capture["files"]
+    assert "/v1/chat/completions" in capture["url"]
+    messages = capture["json"]["messages"]
+    assert messages[0]["role"] == "user"
+    content = messages[0]["content"]
+    assert content[0]["type"] == "audio_url"
+    assert content[0]["audio_url"]["url"].startswith("data:audio/wav;base64,")

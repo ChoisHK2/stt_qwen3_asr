@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import io
 import wave
 
@@ -24,39 +25,47 @@ class ASRClient:
             w.writeframes(audio_i16.tobytes())
         return buff.getvalue()
 
-    def _parse_segments(self, data: dict, audio: np.ndarray, sample_rate: int) -> list[ASRSegment]:
-        if isinstance(data.get("segments"), list) and data["segments"]:
-            return [
-                ASRSegment(
-                    start=float(s.get("start", 0.0)),
-                    end=float(s.get("end", 0.0)),
-                    text=str(s.get("text", "")).strip(),
-                    words=s.get("words", []),
-                )
-                for s in data["segments"]
-            ]
+    def _parse_chat_response(self, data: dict, audio: np.ndarray, sample_rate: int) -> list[ASRSegment]:
+        text = ""
+        choices = data.get("choices")
+        if choices and len(choices) > 0:
+            text = choices[0].get("message", {}).get("content", "").strip()
 
-        text = str(data.get("text", "")).strip()
+        duration = len(audio) / sample_rate
         if text:
-            return [ASRSegment(start=0.0, end=len(audio) / sample_rate, text=text, words=[])]
-
-        return [ASRSegment(start=0.0, end=len(audio) / sample_rate, text="", words=[])]
+            return [ASRSegment(start=0.0, end=duration, text=text, words=[])]
+        return [ASRSegment(start=0.0, end=duration, text="", words=[])]
 
     async def transcribe_partial(self, audio: np.ndarray, sample_rate: int) -> tuple[list[ASRSegment], str | None]:
         wav_bytes = self._to_wav_bytes(audio, sample_rate)
-        files = {"file": ("chunk.wav", wav_bytes, "audio/wav")}
-        data = {
+        audio_b64 = base64.b64encode(wav_bytes).decode()
+
+        payload = {
             "model": self.settings.vllm_model,
-            "response_format": "verbose_json",
-            "timestamp_granularities[]": "segment",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "audio_url",
+                            "audio_url": {
+                                "url": f"data:audio/wav;base64,{audio_b64}",
+                            },
+                        },
+                    ],
+                },
+            ],
         }
 
         try:
             async with httpx.AsyncClient(timeout=self.settings.asr_timeout_sec) as cli:
-                resp = await cli.post(f"{self.settings.vllm_base_url}/v1/audio/transcriptions", data=data, files=files)
+                resp = await cli.post(
+                    f"{self.settings.vllm_base_url}/v1/chat/completions",
+                    json=payload,
+                )
                 resp.raise_for_status()
-                payload = resp.json()
-            return self._parse_segments(payload, audio, sample_rate), None
+                result = resp.json()
+            return self._parse_chat_response(result, audio, sample_rate), None
         except Exception as exc:
             fallback = [ASRSegment(start=0.0, end=len(audio) / sample_rate, text="", words=[])]
             return fallback, str(exc)
