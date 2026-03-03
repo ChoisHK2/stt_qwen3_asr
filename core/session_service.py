@@ -106,12 +106,25 @@ class SessionService:
         partials = await self.store.get_partials(ssid)
         segments = []
         chunks = []
+        offset = 0.0
         for p in partials:
-            for seg in p.get("segments", []):
-                segments.append(seg)
             raw = await self.store.get_chunk(ssid, p["seq"])
+            chunk_duration = 0.0
             if raw:
-                chunks.append(np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0)
+                chunk_audio = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+                chunks.append(chunk_audio)
+                chunk_duration = len(chunk_audio) / sample_rate
+            for seg in p.get("segments", []):
+                seg = dict(seg)
+                seg["start"] = seg.get("start", 0.0) + offset
+                seg["end"] = seg.get("end", 0.0) + offset
+                if seg.get("words"):
+                    seg["words"] = [
+                        {**w, "start": w.get("start", 0.0) + offset, "end": w.get("end", 0.0) + offset}
+                        for w in seg["words"]
+                    ]
+                segments.append(seg)
+            offset += chunk_duration
         full_audio = np.concatenate(chunks) if chunks else np.zeros(sample_rate, dtype=np.float32)
 
         wav_path = f"/tmp/{ssid}.wav"
