@@ -27,6 +27,7 @@ class Settings:
     pyannote_model: str = "pyannote/speaker-diarization-community-1"
     pyannote_local_path: str = "/models/pyannote-speaker-diarization-community-1"
     pyannote_token: str | None = None
+    diar_device: str = "cpu"
     matching_fallback: str = "segment_majority"
     overlap_policy: str = "dominant"
     merge_mode: str = "gap"
@@ -67,6 +68,7 @@ def get_settings() -> Settings:
         pyannote_model=os.getenv("PYANNOTE_MODEL", "pyannote/speaker-diarization-community-1"),
         pyannote_local_path=os.getenv("PYANNOTE_LOCAL_PATH", "/models/pyannote-speaker-diarization-community-1"),
         pyannote_token=os.getenv("PYANNOTE_TOKEN") or None,
+        diar_device=os.getenv("DIAR_DEVICE", "cpu"),
         matching_fallback=os.getenv("MATCHING_FALLBACK", "segment_majority"),
         overlap_policy=os.getenv("OVERLAP_POLICY", "dominant"),
         merge_mode=os.getenv("MERGE_MODE", "gap"),

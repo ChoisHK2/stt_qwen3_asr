@@ -4,7 +4,7 @@ import base64
 import json
 import os
 
-from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
 from api.schemas import FinalizePayload, StartPayload
@@ -12,8 +12,9 @@ from core.config import get_settings
 from core.session_service import SessionService
 from storage.redis_store import RedisStore
 
-app = FastAPI(title="GPU STT Service")
+app = FastAPI(title="Qwen3-ASR STT Service")
 settings = get_settings()
+app.mount("/static", StaticFiles(directory="static"), name="static")
 app.mount("/ui", StaticFiles(directory="ui", html=True), name="ui")
 
 
@@ -57,6 +58,37 @@ async def status(ssid: str):
     return await app.state.session_service.status(ssid)
 
 
+# ── /api/ routes (Vue.js frontend) ──────────────────────────────────
+
+
+@app.post("/api/session")
+async def api_create_session():
+    ssid = await app.state.session_service.start_session(
+        sample_rate=16000, channels=1, chunk_sec=5,
+    )
+    return {"session_id": ssid}
+
+
+@app.post("/api/session/{session_id}/chunk")
+async def api_upload_chunk(session_id: str, seq: int, request: Request):
+    raw = await request.body()
+    result = await app.state.session_service.ingest_chunk(session_id, seq, raw)
+    if result.get("error"):
+        raise HTTPException(status_code=settings.overload_http_code, detail=result)
+    return {
+        "chunk_text": result.get("partial_text", ""),
+        "audio_metrics": result.get("audio_metrics"),
+    }
+
+
+@app.post("/api/session/{session_id}/finalize")
+async def api_finalize(session_id: str):
+    return await app.state.session_service.finalize(session_id)
+
+
+# ── Self-test routes ───────────────────────────────────────────────
+
+
 @app.get("/v1/selftest/model")
 async def selftest_model():
     ok = True
@@ -87,7 +119,7 @@ async def selftest_diarization():
         }
 
     try:
-        app.state.session_service.diar.load(source, token)
+        app.state.session_service.diar.load(source, token, device=settings.diar_device)
         details["load"] = "ok"
         details["source"] = source
         ok = True

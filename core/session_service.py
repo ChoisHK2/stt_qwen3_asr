@@ -146,7 +146,7 @@ class SessionService:
         if diarization_source:
             try:
                 token = self.settings.pyannote_token if diarization_source == self.settings.pyannote_model else None
-                self.diar.load(diarization_source, token)
+                self.diar.load(diarization_source, token, device=self.settings.diar_device)
                 diarization = [d.__dict__ for d in self.diar.diarize(wav_path)]
                 diarization_status = f"ok: {diarization_source}"
             except Exception as exc:
