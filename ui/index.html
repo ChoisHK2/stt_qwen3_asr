@@ -7,19 +7,19 @@
   <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
   <style>
     :root {
-      --bg: #F5F7FA;
+      --bg: #F8FAFC;
       --surface: #ffffff;
       --border: #E2E8F0;
-      --text: #1E293B;
+      --text: #0F172A;
       --text2: #475569;
       --text3: #94A3B8;
       --hover: #F1F5F9;
-      --accent: #4F46E5;
-      --accent-hover: #4338CA;
-      --accent-light: #EEF2FF;
-      --accent-soft: #C7D2FE;
+      --accent: #0D9488;
+      --accent-hover: #0F766E;
+      --accent-light: #F0FDFA;
+      --accent-soft: #99F6E4;
       --rec: #DC2626;
-      --teal: #0F766E;
+      --purple: #7C3AED;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -33,7 +33,7 @@
     .header h1 { font-size: 22px; font-weight: 700; color: var(--text); letter-spacing: -0.03em; }
     .header .brand {
       display: inline-block;
-      background: linear-gradient(135deg, #4F46E5, #7C3AED);
+      background: linear-gradient(135deg, #0D9488, #7C3AED);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
       background-clip: text;
@@ -62,7 +62,7 @@
       background: var(--surface); cursor: pointer;
       text-align: center; transition: all 0.2s; outline: none;
     }
-    .big-btn:hover { border-color: var(--accent-soft); box-shadow: 0 2px 16px rgba(79,70,229,0.10); }
+    .big-btn:hover { border-color: var(--accent-soft); box-shadow: 0 2px 16px rgba(13,148,136,0.10); }
     .big-btn:active { transform: scale(0.98); }
     .big-btn-icon { font-size: 32px; margin-bottom: 12px; color: var(--accent); }
     .big-btn-title { font-size: 16px; font-weight: 700; margin-bottom: 6px; }
@@ -241,6 +241,46 @@
     .edit-actions {
       display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px;
     }
+    /* ── DEV: Debug raw data panel ─────────── */
+    .debug-panel {
+      position: fixed; inset: 0; z-index: 200;
+      background: var(--bg); overflow: auto;
+    }
+    .debug-header {
+      position: sticky; top: 0; z-index: 10;
+      background: var(--surface); border-bottom: 1px solid var(--border);
+      padding: 12px 20px; display: flex; align-items: center; gap: 12px;
+    }
+    .debug-header h3 { font-size: 15px; font-weight: 700; margin: 0; }
+    .debug-columns {
+      display: grid; grid-template-columns: 1fr 1fr 1fr 1fr;
+      gap: 0; min-height: calc(100vh - 52px);
+    }
+    .debug-col {
+      border-right: 1px solid var(--border); padding: 12px;
+      overflow-y: auto; font-size: 12px;
+    }
+    .debug-col:last-child { border-right: none; }
+    .debug-col-title {
+      font-size: 12px; font-weight: 700; color: var(--text2);
+      margin-bottom: 10px; padding-bottom: 6px;
+      border-bottom: 1px solid var(--border);
+      position: sticky; top: 0; background: var(--bg); z-index: 1;
+    }
+    .debug-row {
+      padding: 6px 8px; border-radius: 4px; margin-bottom: 4px;
+      line-height: 1.5; border: 1px solid transparent;
+    }
+    .debug-row:hover { background: var(--hover); border-color: var(--border); }
+    .debug-time {
+      font-family: ui-monospace, monospace; color: var(--text3); font-size: 11px;
+    }
+    .debug-speaker {
+      display: inline-block; padding: 1px 6px; border-radius: 2px;
+      font-size: 10px; font-weight: 700; color: #fff;
+      font-family: ui-monospace, monospace;
+    }
+    .debug-text { color: var(--text); margin-top: 2px; }
     /* ── Error banner ────────────────────────── */
     .error-banner {
       position: fixed; top: 0; left: 0; right: 0;
@@ -286,11 +326,27 @@
           <div class="big-btn-desc">마이크 + 시스템 음성</div>
         </button>
       </div>
+      <label style="font-size:12px;color:var(--text2);display:flex;align-items:center;gap:6px;margin-bottom:12px;cursor:pointer;user-select:none;">
+        <input type="checkbox" v-model="realtimeStt" style="width:16px;height:16px;cursor:pointer;accent-color:var(--accent);" />
+        실시간 확인
+        <span style="font-size:11px;color:var(--text3);">(끄면 GPU 절약, 최종 결과만 생성)</span>
+      </label>
       <button class="file-toggle" @click="showFileTest=!showFileTest">
         파일로 테스트 {{ showFileTest ? '\u25B2' : '\u25BC' }}
       </button>
-      <div v-if="showFileTest" class="file-section">
+      <div v-if="showFileTest" class="file-section" style="flex-wrap:wrap;">
         <input type="file" @change="onFileChange" accept="audio/*" />
+        <label style="font-size:11px;color:var(--text3);display:flex;align-items:center;gap:4px;">
+          청크
+          <select v-model.number="fileChunkSec" style="font-size:11px;padding:2px 4px;border:1px solid var(--border);border-radius:4px;">
+            <option :value="5">5초</option>
+            <option :value="10">10초</option>
+            <option :value="20">20초</option>
+            <option :value="30">30초</option>
+            <option :value="40">40초</option>
+            <option :value="50">50초</option>
+          </select>
+        </label>
         <button class="btn-small" @click="testWithFile" :disabled="!audioFile||fileBusy">전송</button>
       </div>
     </main>
@@ -330,10 +386,16 @@
         <span class="rec-mode">{{ mode==='online' ? '온라인' : mode==='file' ? '파일' : '오프라인' }}</span>
       </div>
       <div class="chunk-box">
-        <div class="chunk-label">{{ latestChunkText ? '최근 인식' : '음성 대기 중...' }}</div>
-        <div class="chunk-text">{{ latestChunkText || '' }}</div>
+        <template v-if="realtimeStt">
+          <div class="chunk-label">{{ latestChunkText ? '최근 인식' : '음성 대기 중...' }}</div>
+          <div class="chunk-text">{{ latestChunkText || '' }}</div>
+        </template>
+        <template v-else>
+          <div class="chunk-label">실시간 확인 꺼짐</div>
+          <div class="chunk-text" style="color:var(--text3);font-size:13px;">오디오 저장 중 (종료 후 일괄 STT 처리)</div>
+        </template>
       </div>
-      <div v-if="lastMetrics" class="metrics-row">
+      <div v-if="realtimeStt && lastMetrics" class="metrics-row">
         <span>SNR {{ lastMetrics.snr_estimate }}dB</span>
         <span v-for="s in (lastMetrics.suggestions||[])" :key="s" class="warn">{{ s }}</span>
       </div>
@@ -345,14 +407,19 @@
     <!-- PROCESSING -->
     <main v-if="phase==='processing'" class="main-center">
       <div class="spinner"></div>
-      <div class="proc-text">화자 분리 처리 중...</div>
-      <div class="proc-sub">Qwen3-ASR로 인식 완료, pyannote로 화자를 분리하고 있습니다</div>
+      <div class="proc-text">STT 재처리 및 화자 분리 중...</div>
+      <div class="proc-sub">Qwen3-ASR로 장단위 재인식 + pyannote 화자 분리 진행 중</div>
     </main>
     <!-- RESULTS -->
     <main v-if="phase==='results'" class="main-results">
       <div class="results-header">
         <h2>회의 결과</h2>
-        <button class="btn-secondary" @click="resetToIdle">새 회의</button>
+        <div style="display:flex;gap:8px;">
+          <button class="btn-small" @click="downloadResults" title="대화록 다운로드">대화록</button>
+          <button class="btn-small" @click="downloadAudio" title="음성파일 다운로드">음성파일</button>
+          <button class="btn-small" @click="showDebug=true" title="DEV: Raw Data 비교">Raw Data</button>
+          <button class="btn-secondary" @click="resetToIdle">새 회의</button>
+        </div>
       </div>
       <div v-if="timeline.length===0" class="no-results">
         음성이 감지되지 않았습니다.
@@ -373,6 +440,48 @@
         </div>
       </div>
     </main>
+    <!-- DEV: Debug raw data panel -->
+    <div v-if="showDebug" class="debug-panel">
+      <div class="debug-header">
+        <h3>Raw Data 비교</h3>
+        <button class="btn-small" @click="showDebug=false">닫기</button>
+      </div>
+      <div class="debug-columns">
+        <div class="debug-col">
+          <div class="debug-col-title">매칭 결과 (timeline)</div>
+          <div v-for="(t, i) in timeline" :key="'t'+i" class="debug-row">
+            <div>
+              <span class="debug-speaker" :style="{background: speakerColor(t.speaker)}">{{ t.speaker }}</span>
+              <span class="debug-time" style="margin-left:6px;">{{ fmtMs(t.start*1000) }} ~ {{ fmtMs(t.end*1000) }}</span>
+            </div>
+            <div class="debug-text">{{ t.text }}</div>
+          </div>
+        </div>
+        <div class="debug-col">
+          <div class="debug-col-title">Diar Raw ({{ rawDiarSegments.length }}개 세그먼트)</div>
+          <div v-for="(s, i) in rawDiarSegments" :key="'d'+i" class="debug-row">
+            <span class="debug-speaker" :style="{background: speakerColor(s.speaker)}">{{ s.speaker }}</span>
+            <span class="debug-time" style="margin-left:6px;">{{ fmtMs(s.start*1000) }} ~ {{ fmtMs(s.end*1000) }}</span>
+          </div>
+        </div>
+        <div class="debug-col">
+          <div class="debug-col-title">STT Chunk ({{ rawSttItems.length }}개)</div>
+          <div v-for="(c, i) in rawSttItems" :key="'s'+i" class="debug-row">
+            <span class="debug-time">{{ fmtMs(c.start_ms) }} ~ {{ fmtMs(c.end_ms) }}</span>
+            <span class="debug-time" style="margin-left:4px;">({{ c.end_ms - c.start_ms }}ms)</span>
+            <div class="debug-text">{{ c.text }}</div>
+          </div>
+        </div>
+        <div class="debug-col">
+          <div class="debug-col-title">STT Final ({{ rawSttFinalItems.length }}개)</div>
+          <div v-for="(c, i) in rawSttFinalItems" :key="'f'+i" class="debug-row">
+            <span class="debug-time">{{ fmtMs(c.start_ms) }} ~ {{ fmtMs(c.end_ms) }}</span>
+            <span class="debug-time" style="margin-left:4px;">({{ c.end_ms - c.start_ms }}ms)</span>
+            <div class="debug-text">{{ c.text }}</div>
+          </div>
+        </div>
+      </div>
+    </div>
     <!-- EDIT MODAL -->
     <div v-if="editOpen" class="overlay" @click.self="closeEdit">
       <div class="edit-modal">
@@ -387,6 +496,6 @@
       </div>
     </div>
   </div>
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=20260306d"></script>
 </body>
 </html>

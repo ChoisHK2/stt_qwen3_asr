@@ -35,6 +35,8 @@ class Settings:
     min_turn_sec: float = 0.4
     max_turn_sec: float = 15.0
     min_words_per_turn: int = 1
+    stt_final_chunk_sec: int = 60  # stop 후 재처리 세그먼트 크기(초)
+    max_session_audio_sec: int = 7200  # 세션당 최대 오디오 길이(초)
     finalize_async_threshold_sec: float = 480
     model_dir: str = "/models"
 
@@ -76,6 +78,8 @@ def get_settings() -> Settings:
         min_turn_sec=float(os.getenv("MIN_TURN_SEC", "0.4")),
         max_turn_sec=float(os.getenv("MAX_TURN_SEC", "15")),
         min_words_per_turn=int(os.getenv("MIN_WORDS_PER_TURN", "1")),
+        stt_final_chunk_sec=int(os.getenv("STT_FINAL_CHUNK_SEC", "60")),
+        max_session_audio_sec=int(os.getenv("MAX_SESSION_AUDIO_SEC", "7200")),
         finalize_async_threshold_sec=float(os.getenv("FINALIZE_ASYNC_THRESHOLD_SEC", "480")),
         model_dir=os.getenv("MODEL_DIR", "/models"),
     )

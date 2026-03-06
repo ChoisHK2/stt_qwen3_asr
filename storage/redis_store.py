@@ -79,3 +79,36 @@ class RedisStore:
 
     async def dequeue_chunk(self, timeout: int = 1):
         return await self.redis.blpop("queue:chunks", timeout=timeout)
+
+    # ── STT Final re-processing keys ───────────────────────────────
+
+    def _stt_final_key(self, ssid: str) -> str:
+        return f"session:{ssid}:stt_final"
+
+    async def set_stt_final(self, ssid: str, items: list[dict[str, Any]]) -> None:
+        key = self._stt_final_key(ssid)
+        await self.redis.set(key, json.dumps(items).encode())
+        await self.redis.expire(key, self.settings.session_ttl_sec)
+
+    async def get_stt_final(self, ssid: str) -> list[dict[str, Any]]:
+        raw = await self.redis.get(self._stt_final_key(ssid))
+        if raw:
+            return json.loads(raw)
+        return []
+
+    # ── Full PCM storage (for final re-processing) ─────────────────
+
+    def _pcm_key(self, ssid: str) -> str:
+        return f"session:{ssid}:pcm"
+
+    async def append_pcm(self, ssid: str, pcm_bytes: bytes) -> int:
+        """Append PCM data and return total length in bytes."""
+        key = self._pcm_key(ssid)
+        await self.redis.append(key, pcm_bytes)
+        length = await self.redis.strlen(key)
+        await self.redis.expire(key, self.settings.session_ttl_sec)
+        return length
+
+    async def get_pcm(self, ssid: str) -> bytes:
+        raw = await self.redis.get(self._pcm_key(ssid))
+        return raw or b""
