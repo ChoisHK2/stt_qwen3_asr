@@ -42,4 +42,19 @@ class DiarizationClient:
         turns: list[DiarTurn] = []
         for seg, _, speaker in annotation.itertracks(yield_label=True):
             turns.append(DiarTurn(speaker=str(speaker), start=float(seg.start), end=float(seg.end)))
+        return merge_same_speaker_segments(turns)
+
+
+def merge_same_speaker_segments(turns: list[DiarTurn], gap_sec: float = 0.3) -> list[DiarTurn]:
+    """Merge adjacent diarization turns from the same speaker within gap_sec."""
+    if not turns:
         return turns
+    sorted_turns = sorted(turns, key=lambda t: t.start)
+    merged: list[DiarTurn] = [DiarTurn(speaker=sorted_turns[0].speaker, start=sorted_turns[0].start, end=sorted_turns[0].end)]
+    for t in sorted_turns[1:]:
+        prev = merged[-1]
+        if t.speaker == prev.speaker and (t.start - prev.end) <= gap_sec:
+            prev.end = max(prev.end, t.end)
+        else:
+            merged.append(DiarTurn(speaker=t.speaker, start=t.start, end=t.end))
+    return merged

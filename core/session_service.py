@@ -52,6 +52,13 @@ class SessionService:
                 "duplicate": True,
             }
 
+        # Track cumulative sample position for start_ms / end_ms
+        total_samples = int(meta.get("total_samples", 0))
+        num_samples = len(raw) // 2  # 16-bit PCM
+        start_ms = int(total_samples * 1000 / sample_rate)
+        end_ms = int((total_samples + num_samples) * 1000 / sample_rate)
+        await self.store.update_session_field(ssid, "total_samples", total_samples + num_samples)
+
         audio, metrics = preprocess_chunk(raw, channels=channels)
         qsize = await self.store.enqueue_chunk(
             {
@@ -81,7 +88,13 @@ class SessionService:
             segs, asr_error = await self.asr.transcribe_partial(audio, sample_rate)
             partial_text = " ".join(s.text for s in segs).strip()
             await self.store.append_partial(
-                ssid, {"seq": seq, "text": partial_text, "segments": [s.__dict__ for s in segs]}
+                ssid, {
+                    "seq": seq,
+                    "text": partial_text,
+                    "segments": [s.__dict__ for s in segs],
+                    "start_ms": start_ms,
+                    "end_ms": end_ms,
+                }
             )
         else:
             partial_text = ""
@@ -91,6 +104,8 @@ class SessionService:
             "backlog_hint": backlog_hint,
             "partial_text": partial_text,
             "audio_metrics": metrics.__dict__,
+            "start_ms": start_ms,
+            "end_ms": end_ms,
         }
         if self.settings.partial_mode == "on" and asr_error:
             response["asr_error"] = asr_error
@@ -164,11 +179,29 @@ class SessionService:
         diar_turns = [DiarTurn(**d) for d in diarization]
         timeline = [t.__dict__ for t in map_speakers(asr_segments, diar_turns)]
 
+        # Build raw_stt_items with start_ms/end_ms from partials
+        raw_stt_items = []
+        for p in partials:
+            raw_stt_items.append({
+                "seq": p["seq"],
+                "text": p.get("text", ""),
+                "start_ms": p.get("start_ms", 0),
+                "end_ms": p.get("end_ms", 0),
+            })
+
+        # Build raw_diar_segments
+        raw_diar_segments = [
+            {"speaker": d["speaker"], "start": d["start"], "end": d["end"]}
+            for d in diarization
+        ]
+
         return {
             "ssid": ssid,
             "timeline": timeline,
             "full_text": " ".join(s["text"] for s in segments).strip(),
             "diarization": diarization,
+            "raw_stt_items": raw_stt_items,
+            "raw_diar_segments": raw_diar_segments,
             "meta": {
                 "matching_fallback": self.settings.matching_fallback,
                 "diarization_status": diarization_status,

@@ -5,6 +5,7 @@ import json
 import os
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 
 from api.schemas import FinalizePayload, StartPayload
@@ -78,12 +79,48 @@ async def api_upload_chunk(session_id: str, seq: int, request: Request):
     return {
         "chunk_text": result.get("partial_text", ""),
         "audio_metrics": result.get("audio_metrics"),
+        "start_ms": result.get("start_ms", 0),
+        "end_ms": result.get("end_ms", 0),
     }
 
 
 @app.post("/api/session/{session_id}/finalize")
 async def api_finalize(session_id: str):
     return await app.state.session_service.finalize(session_id)
+
+
+@app.get("/api/session/{session_id}/audio")
+async def api_download_audio(session_id: str):
+    import wave as _wave
+    import io
+    import numpy as np
+
+    svc: SessionService = app.state.session_service
+    meta = await svc.store.get_session_meta(session_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail="Session not found")
+    sample_rate = int(meta.get("sample_rate", 16000))
+    partials = await svc.store.get_partials(session_id)
+    chunks = []
+    for p in partials:
+        raw = await svc.store.get_chunk(session_id, p["seq"])
+        if raw:
+            chunk_audio = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+            chunks.append(chunk_audio)
+    if not chunks:
+        raise HTTPException(status_code=404, detail="No audio data")
+    full_audio = np.concatenate(chunks)
+    buf = io.BytesIO()
+    with _wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sample_rate)
+        w.writeframes((full_audio * 32767).astype("<i2").tobytes())
+    return Response(
+        content=buf.getvalue(),
+        media_type="audio/wav",
+        headers={"Content-Disposition": f'attachment; filename="{session_id}.wav"'},
+    )
 
 
 # ── Self-test routes ───────────────────────────────────────────────

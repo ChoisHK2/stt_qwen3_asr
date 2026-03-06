@@ -37,6 +37,10 @@ createApp({
       showFileTest: false,
       audioFile: null,
       fileBusy: false,
+      // Debug / Raw data
+      showDebug: false,
+      rawSttItems: [],
+      rawDiarSegments: [],
     };
   },
   computed: {
@@ -47,6 +51,13 @@ createApp({
     },
     speakerList() {
       return [...new Set(this.timeline.map((t) => t.speaker))];
+    },
+    debugJson() {
+      return {
+        rawSttItems: this.rawSttItems,
+        rawDiarSegments: this.rawDiarSegments,
+        timeline: this.timeline,
+      };
     },
   },
   methods: {
@@ -255,6 +266,8 @@ createApp({
         const r = await this.api(`/api/session/${this.sessionId}/finalize`, { method: "POST" });
         this.timeline = (r.timeline || []).map((t) => ({ ...t }));
         this.fullText = r.full_text || "";
+        this.rawSttItems = r.raw_stt_items || [];
+        this.rawDiarSegments = r.raw_diar_segments || [];
         this.phase = "results";
         if (this.timeline.length === 0 && !this.fullText) {
           this.errorMsg = "음성이 감지되지 않았습니다.";
@@ -340,6 +353,8 @@ createApp({
         const r = await this.api(`/api/session/${this.sessionId}/finalize`, { method: "POST" });
         this.timeline = (r.timeline || []).map((t) => ({ ...t }));
         this.fullText = r.full_text || "";
+        this.rawSttItems = r.raw_stt_items || [];
+        this.rawDiarSegments = r.raw_diar_segments || [];
         this.phase = "results";
         if (this.timeline.length === 0 && !this.fullText) {
           this.errorMsg = "음성이 감지되지 않았습니다.";
@@ -367,6 +382,42 @@ createApp({
     closeEdit() {
       this.editOpen = false;
     },
+    downloadResults() {
+      let txt = "";
+      for (const t of this.timeline) {
+        const ts = this.formatSec(t.start) + " ~ " + this.formatSec(t.end);
+        txt += `[${t.speaker}] (${ts})\n${t.text}\n\n`;
+      }
+      const blob = new Blob([txt], { type: "text/plain;charset=utf-8" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `transcript_${this.sessionId || "result"}.txt`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    },
+    downloadAudio() {
+      if (!this.sessionId) return;
+      const a = document.createElement("a");
+      a.href = `${this.apiBase}/api/session/${this.sessionId}/audio`;
+      a.download = `${this.sessionId}.wav`;
+      a.click();
+    },
+    downloadRawData() {
+      const data = JSON.stringify(this.debugJson, null, 2);
+      const blob = new Blob([data], { type: "application/json;charset=utf-8" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `raw_data_${this.sessionId || "result"}.json`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    },
+    fmtMs(ms) {
+      if (ms == null) return "";
+      const sec = Math.floor(ms / 1000);
+      const m = Math.floor(sec / 60);
+      const s = sec % 60;
+      return `${m}:${String(s).padStart(2, "0")}`;
+    },
     resetToIdle() {
       this.phase = "idle";
       this.sessionId = "";
@@ -377,6 +428,9 @@ createApp({
       this.chunkSeq = 0;
       this.chunkCount = 0;
       this.errorMsg = "";
+      this.rawSttItems = [];
+      this.rawDiarSegments = [];
+      this.showDebug = false;
     },
     // ── Helpers ───────────────────────────────────────────
     speakerColor(speaker) {

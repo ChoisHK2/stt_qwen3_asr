@@ -45,6 +45,9 @@ class RedisStore:
         data = await self.redis.hgetall(self._session_key(ssid))
         return {k.decode(): json.loads(v) for k, v in data.items()} if data else {}
 
+    async def update_session_field(self, ssid: str, field: str, value: Any) -> None:
+        await self.redis.hset(self._session_key(ssid), field, json.dumps(value).encode())
+
     async def record_chunk(self, ssid: str, seq: int, payload: bytes) -> bool:
         seq_key = self._seq_key(ssid)
         added = await self.redis.sadd(seq_key, str(seq))

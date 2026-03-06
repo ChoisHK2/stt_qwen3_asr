@@ -241,6 +241,52 @@
     .edit-actions {
       display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px;
     }
+    /* ── Download buttons row ────────────────── */
+    .dl-row {
+      display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px;
+    }
+    .btn-dl {
+      padding: 7px 16px; border: 1px solid var(--accent-soft); border-radius: 6px;
+      background: var(--accent-light); color: var(--accent); font-size: 12px;
+      cursor: pointer; font-weight: 600; display: flex; align-items: center; gap: 4px;
+    }
+    .btn-dl:hover { background: var(--accent-soft); color: #fff; }
+    .btn-debug {
+      padding: 7px 16px; border: 1px solid var(--border); border-radius: 6px;
+      background: var(--surface); color: var(--text3); font-size: 12px;
+      cursor: pointer; font-weight: 600;
+    }
+    .btn-debug:hover { background: var(--hover); color: var(--text); }
+    .btn-debug.active { background: var(--accent-light); color: var(--accent); border-color: var(--accent-soft); }
+    /* ── Debug panel ─────────────────────────── */
+    .debug-panel {
+      margin-top: 20px; border: 1px solid var(--border); border-radius: 10px;
+      background: var(--surface); overflow: hidden;
+    }
+    .debug-title {
+      padding: 12px 16px; font-size: 13px; font-weight: 700; color: var(--text2);
+      background: var(--hover); border-bottom: 1px solid var(--border);
+    }
+    .debug-cols {
+      display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0;
+      max-height: 400px; overflow-y: auto;
+    }
+    @media (max-width: 640px) { .debug-cols { grid-template-columns: 1fr; } }
+    .debug-col {
+      padding: 12px; border-right: 1px solid var(--border);
+      font-size: 11px; font-family: ui-monospace, monospace; color: var(--text2);
+      overflow-y: auto;
+    }
+    .debug-col:last-child { border-right: none; }
+    .debug-col-title {
+      font-size: 11px; font-weight: 700; color: var(--text3); margin-bottom: 8px;
+      text-transform: uppercase; letter-spacing: 0.05em;
+    }
+    .debug-item {
+      padding: 4px 0; border-bottom: 1px solid var(--border);
+      line-height: 1.4;
+    }
+    .debug-item:last-child { border-bottom: none; }
     /* ── Error banner ────────────────────────── */
     .error-banner {
       position: fixed; top: 0; left: 0; right: 0;
@@ -354,6 +400,15 @@
         <h2>회의 결과</h2>
         <button class="btn-secondary" @click="resetToIdle">새 회의</button>
       </div>
+      <!-- Download & Debug buttons -->
+      <div class="dl-row">
+        <button class="btn-dl" @click="downloadResults">&#x1F4CB; 대화록</button>
+        <button class="btn-dl" @click="downloadAudio">&#x1F3A4; 음성파일</button>
+        <button class="btn-dl" @click="downloadRawData">&#x1F4BE; Raw Data</button>
+        <button class="btn-debug" :class="{ active: showDebug }" @click="showDebug=!showDebug">
+          {{ showDebug ? 'Debug &#x25B2;' : 'Debug &#x25BC;' }}
+        </button>
+      </div>
       <div v-if="timeline.length===0" class="no-results">
         음성이 감지되지 않았습니다.
       </div>
@@ -370,6 +425,35 @@
             <span class="edit-hint">수정</span>
           </div>
           <div class="turn-text">{{ turn.text }}</div>
+        </div>
+      </div>
+      <!-- Debug Panel -->
+      <div v-if="showDebug" class="debug-panel">
+        <div class="debug-title">Raw Data Viewer</div>
+        <div class="debug-cols">
+          <div class="debug-col">
+            <div class="debug-col-title">Timeline ({{ timeline.length }})</div>
+            <div v-for="(t, i) in timeline" :key="'tl'+i" class="debug-item">
+              <strong>{{ t.speaker }}</strong> {{ formatSec(t.start) }}-{{ formatSec(t.end) }}<br/>
+              {{ t.text }}
+            </div>
+            <div v-if="timeline.length===0" class="debug-item" style="color:var(--text3)">No data</div>
+          </div>
+          <div class="debug-col">
+            <div class="debug-col-title">Diar Raw ({{ rawDiarSegments.length }})</div>
+            <div v-for="(d, i) in rawDiarSegments" :key="'dr'+i" class="debug-item">
+              <strong>{{ d.speaker }}</strong> {{ formatSec(d.start) }}-{{ formatSec(d.end) }}
+            </div>
+            <div v-if="rawDiarSegments.length===0" class="debug-item" style="color:var(--text3)">No data</div>
+          </div>
+          <div class="debug-col">
+            <div class="debug-col-title">STT Raw ({{ rawSttItems.length }})</div>
+            <div v-for="(s, i) in rawSttItems" :key="'st'+i" class="debug-item">
+              <strong>#{{ s.seq }}</strong> {{ fmtMs(s.start_ms) }}-{{ fmtMs(s.end_ms) }}<br/>
+              {{ s.text }}
+            </div>
+            <div v-if="rawSttItems.length===0" class="debug-item" style="color:var(--text3)">No data</div>
+          </div>
         </div>
       </div>
     </main>
