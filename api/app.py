@@ -3,8 +3,10 @@ from __future__ import annotations
 import base64
 import json
 import os
+import time
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from api.schemas import FinalizePayload, StartPayload
@@ -17,9 +19,14 @@ settings = get_settings()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 app.mount("/ui", StaticFiles(directory="ui", html=True), name="ui")
 
+_start_ts: float = time.time()
+
 
 @app.on_event("startup")
 async def startup():
+    global _start_ts
+    _start_ts = time.time()
+    os.makedirs("data/audio", exist_ok=True)
     store = await RedisStore.from_url(settings.redis_url)
     app.state.store = store
     app.state.session_service = SessionService(store)
@@ -28,6 +35,38 @@ async def startup():
 @app.get("/__ping")
 async def ping():
     return "OK"
+
+
+@app.get("/api/health")
+async def health():
+    return {
+        "status": "ok",
+        "uptime_sec": round(time.time() - _start_ts, 1),
+        "config": {
+            "stt_final_chunk_sec": settings.stt_final_chunk_sec,
+            "max_session_audio_sec": settings.max_session_audio_sec,
+            "session_ttl_sec": settings.session_ttl_sec,
+            "vllm_model": settings.vllm_model,
+        },
+    }
+
+
+@app.get("/api/runtime")
+async def runtime_info():
+    return {
+        "sample_rate": 16000,
+        "stt_language": "auto",
+        "vllm_model": settings.vllm_model,
+        "vllm_base_url": settings.vllm_base_url,
+        "preprocess_enabled": settings.preprocess_enabled,
+        "noise_reduction_mode": settings.noise_reduction_mode,
+        "diar_device": settings.diar_device,
+        "pyannote_local_path": settings.pyannote_local_path,
+        "session_ttl_sec": settings.session_ttl_sec,
+        "merge_mode": settings.merge_mode,
+        "merge_gap_sec": settings.merge_gap_sec,
+        "stt_final_chunk_sec": settings.stt_final_chunk_sec,
+    }
 
 
 @app.post("/v1/sessions/")
@@ -39,9 +78,15 @@ async def create_session(payload: StartPayload):
 
 
 @app.post("/v1/sessions/{ssid}/chunk")
-async def upload_chunk(ssid: str, seq: int, t0: float | None = None, file: UploadFile = File(...)):
+async def upload_chunk(
+    ssid: str,
+    seq: int,
+    t0: float | None = None,
+    realtime: int = Query(default=1),
+    file: UploadFile = File(...),
+):
     raw = await file.read()
-    result = await app.state.session_service.ingest_chunk(ssid, seq, raw, t0)
+    result = await app.state.session_service.ingest_chunk(ssid, seq, raw, t0, realtime=bool(realtime))
     if result.get("error"):
         raise HTTPException(status_code=settings.overload_http_code, detail=result)
     return result
@@ -50,6 +95,12 @@ async def upload_chunk(ssid: str, seq: int, t0: float | None = None, file: Uploa
 @app.post("/v1/sessions/{ssid}/finalize")
 async def finalize(ssid: str):
     result = await app.state.session_service.finalize(ssid)
+    return result
+
+
+@app.post("/v1/sessions/{ssid}/stop")
+async def stop_session(ssid: str):
+    result = await app.state.session_service.stop_session(ssid)
     return result
 
 
@@ -66,24 +117,72 @@ async def api_create_session():
     ssid = await app.state.session_service.start_session(
         sample_rate=16000, channels=1, chunk_sec=5,
     )
-    return {"session_id": ssid}
+    return {"session_id": ssid, "ttl_sec": settings.session_ttl_sec}
 
 
 @app.post("/api/session/{session_id}/chunk")
-async def api_upload_chunk(session_id: str, seq: int, request: Request):
+async def api_upload_chunk(
+    session_id: str,
+    seq: int,
+    request: Request,
+    realtime: int = Query(default=1),
+):
     raw = await request.body()
-    result = await app.state.session_service.ingest_chunk(session_id, seq, raw)
+    if not raw:
+        return {"chunk_text": "", "audio_metrics": None, "backlog_hint": "ok"}
+    if len(raw) > 2 * 1024 * 1024:
+        raise HTTPException(413, f"chunk too large: {len(raw)} bytes")
+    if len(raw) % 2 != 0:
+        raise HTTPException(400, "invalid PCM16 payload size")
+
+    result = await app.state.session_service.ingest_chunk(
+        session_id, seq, raw, realtime=bool(realtime),
+    )
     if result.get("error"):
-        raise HTTPException(status_code=settings.overload_http_code, detail=result)
+        code = 429 if result["error"] in ("GLOBAL_QUEUE_FULL", "SESSION_STOPPED") else 413
+        raise HTTPException(status_code=code, detail=result["error"])
     return {
+        "session_id": session_id,
+        "seq": seq,
+        "accepted_seq": result.get("accepted_seq", seq),
         "chunk_text": result.get("partial_text", ""),
+        "stt_text": "",
+        "received_bytes": len(raw),
+        "start_ms": result.get("start_ms", 0),
+        "end_ms": result.get("end_ms", 0),
         "audio_metrics": result.get("audio_metrics"),
+        "backlog_hint": result.get("backlog_hint", "ok"),
+        "duplicate": result.get("duplicate", False),
     }
+
+
+@app.post("/api/session/{session_id}/stop")
+async def api_stop_session(session_id: str):
+    result = await app.state.session_service.stop_session(session_id)
+    return result
+
+
+@app.get("/api/session/{session_id}/status")
+async def api_session_status(session_id: str):
+    return await app.state.session_service.status(session_id)
 
 
 @app.post("/api/session/{session_id}/finalize")
 async def api_finalize(session_id: str):
     return await app.state.session_service.finalize(session_id)
+
+
+@app.get("/api/session/{session_id}/audio")
+async def api_session_audio(session_id: str):
+    st = await app.state.session_service.status(session_id)
+    audio_path = st.get("audio_path", "")
+    if not audio_path or not os.path.isfile(audio_path):
+        raise HTTPException(404, "audio file not found")
+    return FileResponse(
+        audio_path,
+        media_type="audio/wav",
+        filename=f"meeting_{session_id[:8]}.wav",
+    )
 
 
 # ── Self-test routes ───────────────────────────────────────────────
@@ -155,13 +254,20 @@ async def websocket_endpoint(ws: WebSocket):
                     payload = FinalizePayload(**event["payload"])
                     result = await svc.finalize(payload.ssid)
                     await ws.send_json({"type": "final", **result})
+                elif typ == "stop":
+                    ssid = event["payload"]["ssid"]
+                    result = await svc.stop_session(ssid)
+                    await ws.send_json({"type": "stopped", **result})
                 elif typ == "status":
                     ssid = event["payload"]["ssid"]
                     await ws.send_json({"type": "ack", **(await svc.status(ssid))})
             elif "bytes" in msg and msg["bytes"]:
                 frame = json.loads(msg["bytes"][: msg["bytes"].find(b"\n")].decode())
                 raw = base64.b64decode(msg["bytes"][msg["bytes"].find(b"\n") + 1 :])
-                result = await svc.ingest_chunk(frame["ssid"], frame["seq"], raw, frame.get("t0"))
+                realtime = frame.get("realtime", True)
+                result = await svc.ingest_chunk(
+                    frame["ssid"], frame["seq"], raw, frame.get("t0"), realtime=realtime,
+                )
                 if result.get("error"):
                     await ws.send_json({"type": "error", "ssid": frame["ssid"], **result})
                 else:

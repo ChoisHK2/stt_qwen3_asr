@@ -33,10 +33,20 @@ createApp({
       editIdx: -1,
       editText: "",
       editSpeaker: "",
+      // Chunk duration (seconds)
+      recChunkSec: 5,     // 실시간 녹음
+      fileChunkSec: 30,   // 파일 테스트
+      // 실시간 확인 (on: 5초마다 STT 수행, off: 오디오 저장만)
+      realtimeStt: true,
       // File test
       showFileTest: false,
       audioFile: null,
       fileBusy: false,
+      // DEV: debug raw data
+      showDebug: false,
+      rawSttItems: [],
+      rawDiarSegments: [],
+      rawSttFinalItems: [],
     };
   },
   computed: {
@@ -60,7 +70,11 @@ createApp({
       } catch {
         body = { raw: text };
       }
-      if (!res.ok) throw new Error(body.detail || body.raw || `HTTP ${res.status}`);
+      if (!res.ok) {
+        const err = new Error(body.detail || body.raw || `HTTP ${res.status}`);
+        err.status = res.status;
+        throw err;
+      }
       return body;
     },
     async createSession() {
@@ -156,7 +170,7 @@ createApp({
       this.audioCtx = ctx;
       const nativeRate = ctx.sampleRate;
       const targetRate = 16000;
-      const chunkSamples = targetRate * 5; // 5 seconds
+      const chunkSamples = targetRate * this.recChunkSec;
       const proc = ctx.createScriptProcessor(4096, 1, 1);
       this.scriptProc = proc;
       const mixer = ctx.createGain();
@@ -217,17 +231,23 @@ createApp({
     },
     async sendSingleChunk(bytes) {
       const seq = this.chunkSeq++;
+      const rt = this.realtimeStt ? 1 : 0;
       try {
-        const r = await this.api(`/api/session/${this.sessionId}/chunk?seq=${seq}`, {
+        const r = await this.api(`/api/session/${this.sessionId}/chunk?seq=${seq}&realtime=${rt}`, {
           method: "POST",
           headers: { "Content-Type": "application/octet-stream" },
           body: bytes,
         });
-        this.latestChunkText = r.chunk_text || "";
+        if (this.realtimeStt) {
+          this.latestChunkText = r.chunk_text || "";
+        }
         this.chunkCount = seq + 1;
         if (r.audio_metrics) this.lastMetrics = r.audio_metrics;
       } catch (e) {
         console.error("chunk send error:", e);
+        if (e.status === 413 || e.status === 429) {
+          this.errorMsg = e.message;
+        }
       }
     },
     // ── Stop & Finalize ───────────────────────────────────
@@ -235,6 +255,7 @@ createApp({
       clearInterval(this.recordingTimer);
       clearInterval(this.sendInterval);
       this.phase = "processing";
+      // Flush remaining audio
       if (this.pcmLen > 0) {
         const merged = this.mergeFloat32(this.pcmBuf, this.pcmLen);
         const bytes = this.float32ToInt16Bytes(merged);
@@ -242,19 +263,27 @@ createApp({
         this.pcmBuf = [];
         this.pcmLen = 0;
       }
+      // Wait for queue to drain
       const waitStart = Date.now();
       while ((this.chunkQueue.length > 0 || this.sending) && Date.now() - waitStart < 60000) {
         await new Promise((r) => setTimeout(r, 200));
       }
+      // Cleanup audio
       if (this.scriptProc) this.scriptProc.disconnect();
       if (this.audioCtx && this.audioCtx.state !== "closed") {
         try { await this.audioCtx.close(); } catch {}
       }
       this.stopStreams();
+      // stop -> background diarization + STT reprocessing
       try {
+        await this.api(`/api/session/${this.sessionId}/stop`, { method: "POST" });
+        await this._pollUntilDone();
         const r = await this.api(`/api/session/${this.sessionId}/finalize`, { method: "POST" });
         this.timeline = (r.timeline || []).map((t) => ({ ...t }));
         this.fullText = r.full_text || "";
+        this.rawSttItems = r.raw_stt_items || [];
+        this.rawDiarSegments = r.raw_diar_segments || [];
+        this.rawSttFinalItems = r.raw_stt_final_items || [];
         this.phase = "results";
         if (this.timeline.length === 0 && !this.fullText) {
           this.errorMsg = "음성이 감지되지 않았습니다.";
@@ -262,6 +291,19 @@ createApp({
       } catch (e) {
         this.errorMsg = `처리 실패: ${e.message}`;
         this.phase = "idle";
+      }
+    },
+    async _pollUntilDone() {
+      const pollStart = Date.now();
+      const POLL_TIMEOUT = 20 * 60 * 1000;
+      while (Date.now() - pollStart < POLL_TIMEOUT) {
+        await new Promise((r) => setTimeout(r, 3000));
+        const status = await this.api(`/api/session/${this.sessionId}/status`);
+        const diarDone = status.diar_status === "done" || status.diar_status === "error";
+        const sttFinalDone = status.stt_final_status === "done" || status.stt_final_status === "error";
+        if (status.diar_status === "error") console.warn("diarization error:", status.diar_error);
+        if (status.stt_final_status === "error") console.warn("stt final error:", status.stt_final_error);
+        if (diarDone && sttFinalDone) break;
       }
     },
     stopStreams() {
@@ -318,33 +360,52 @@ createApp({
       try {
         await this.createSession();
         const pcm = await this.decodeToPcm16(this.audioFile, 16000);
-        const chunkSamples = 16000 * 5;
+        const chunkSamples = 16000 * this.fileChunkSec;
+        const totalChunks = Math.ceil(pcm.length / chunkSamples);
         this.phase = "recording";
         this.mode = "file";
         this.recordingTime = 0;
+        let chunkErrors = 0;
+        const rt = this.realtimeStt ? 1 : 0;
         for (let pos = 0; pos < pcm.length; pos += chunkSamples) {
           const end = Math.min(pcm.length, pos + chunkSamples);
           const part = pcm.subarray(pos, end);
           const bytes = new Uint8Array(part.buffer, part.byteOffset, part.byteLength);
           const seq = this.chunkSeq++;
-          const r = await this.api(`/api/session/${this.sessionId}/chunk?seq=${seq}`, {
-            method: "POST",
-            headers: { "Content-Type": "application/octet-stream" },
-            body: bytes,
-          });
-          this.latestChunkText = r.chunk_text || "";
-          this.chunkCount = seq + 1;
-          if (r.audio_metrics) this.lastMetrics = r.audio_metrics;
+          try {
+            const r = await this.api(`/api/session/${this.sessionId}/chunk?seq=${seq}&realtime=${rt}`, {
+              method: "POST",
+              headers: { "Content-Type": "application/octet-stream" },
+              body: bytes,
+            });
+            if (this.realtimeStt) {
+              this.latestChunkText = r.chunk_text || "";
+            }
+            this.chunkCount = seq + 1;
+            if (r.audio_metrics) this.lastMetrics = r.audio_metrics;
+          } catch (ce) {
+            chunkErrors++;
+            console.error(`chunk ${seq}/${totalChunks} failed:`, ce.message);
+            if (ce.status === 413 || ce.status === 429) break;
+          }
+          this.recordingTime = Math.floor(end / 16000);
         }
+        if (chunkErrors > 0) console.warn(`${chunkErrors}/${totalChunks} chunks failed`);
         this.phase = "processing";
+        await this.api(`/api/session/${this.sessionId}/stop`, { method: "POST" });
+        await this._pollUntilDone();
         const r = await this.api(`/api/session/${this.sessionId}/finalize`, { method: "POST" });
         this.timeline = (r.timeline || []).map((t) => ({ ...t }));
         this.fullText = r.full_text || "";
+        this.rawSttItems = r.raw_stt_items || [];
+        this.rawDiarSegments = r.raw_diar_segments || [];
+        this.rawSttFinalItems = r.raw_stt_final_items || [];
         this.phase = "results";
         if (this.timeline.length === 0 && !this.fullText) {
           this.errorMsg = "음성이 감지되지 않았습니다.";
         }
       } catch (e) {
+        console.error("testWithFile error:", e);
         this.errorMsg = `파일 처리 실패: ${e.message}`;
         this.phase = "idle";
       } finally {
@@ -377,12 +438,19 @@ createApp({
       this.chunkSeq = 0;
       this.chunkCount = 0;
       this.errorMsg = "";
+      this.mode = "";
+      this.recordingTime = 0;
+      this.showDebug = false;
+      this.rawSttItems = [];
+      this.rawDiarSegments = [];
+      this.rawSttFinalItems = [];
+      window.scrollTo(0, 0);
     },
     // ── Helpers ───────────────────────────────────────────
     speakerColor(speaker) {
       const list = this.speakerList;
       const idx = list.indexOf(speaker);
-      const shades = ["#4338CA", "#0F766E", "#9333EA", "#B45309", "#1D4ED8"];
+      const shades = ["#0D9488", "#7C3AED", "#D97706", "#2563EB", "#DC2626"];
       return shades[idx % shades.length];
     },
     formatSec(sec) {
@@ -390,6 +458,47 @@ createApp({
       const m = Math.floor(sec / 60);
       const s = Math.floor(sec % 60);
       return `${m}:${String(s).padStart(2, "0")}`;
+    },
+    fmtMs(ms) {
+      if (ms == null) return "";
+      const totalSec = ms / 1000;
+      const m = Math.floor(totalSec / 60);
+      const s = (totalSec % 60).toFixed(1);
+      return `${m}:${s.padStart(4, "0")}`;
+    },
+    downloadAudio() {
+      if (!this.sessionId) return;
+      const url = `${this.apiBase}/api/session/${this.sessionId}/audio`;
+      const iframe = document.createElement("iframe");
+      iframe.style.display = "none";
+      iframe.src = url;
+      document.body.appendChild(iframe);
+      setTimeout(() => { try { document.body.removeChild(iframe); } catch(e) {} }, 60000);
+    },
+    downloadResults() {
+      const lines = [];
+      lines.push("=== 회의 결과 ===");
+      lines.push(`세션: ${this.sessionId}`);
+      lines.push(`생성: ${new Date().toLocaleString("ko-KR")}`);
+      lines.push("");
+      for (const t of this.timeline) {
+        lines.push(`[${this.formatSec(t.start)} ~ ${this.formatSec(t.end)}] ${t.speaker}`);
+        lines.push(t.text);
+        lines.push("");
+      }
+      if (this.fullText) {
+        lines.push("=== 전체 텍스트 ===");
+        lines.push(this.fullText);
+      }
+      const blob = new Blob([lines.join("\n")], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `meeting_${this.sessionId.slice(0, 8)}_${new Date().toISOString().slice(0, 10)}.txt`;
+      a.style.display = "none";
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 500);
     },
   },
   beforeUnmount() {
