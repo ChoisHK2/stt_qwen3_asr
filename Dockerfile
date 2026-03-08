@@ -27,4 +27,3 @@ ENV TRANSFORMERS_OFFLINE=1
 ENV DIAR_DEVICE=auto
 
 ENTRYPOINT ["/app/entrypoint.sh"]
-CMD ["api"]

@@ -1,32 +1,36 @@
 # GPU STT 통합 서버 (Qwen3-ASR + pyannote diarization)
 
-WAS는 chunk를 그대로 프록시하고, GPU 서버가 세션/큐/전처리/partial/finalize를 처리하는 레퍼런스 구현입니다.
+FastAPI 기반 실시간 STT 서버. vLLM으로 Qwen3-ASR 모델을 서빙하고, pyannote로 화자분리를 수행합니다.
 
 ## 아키텍처
 - `api/`: FastAPI WS(`/v1/ws`) + REST fallback
 - `core/`: 설정, 세션 서비스, diarization-ASR 매칭, merge 정책
 - `audio/`: PCM16 전처리(증폭/노이즈제거/품질지표)
 - `storage/`: Redis 기반 TTL/복구/idempotency 저장소
-- `workers/`: 큐 소비 워커(추론 동시성 제한 지점)
-- `clients/`: WS/REST 샘플 클라이언트
+- `clients/`: ASR/diarization 클라이언트 + WS/REST 샘플
+
+### vLLM 자체 큐잉 활용
+vLLM은 continuous batching으로 동시 요청을 자체 관리합니다.
+별도의 Redis 큐/워커 없이, API에서 직접 vLLM HTTP API를 호출합니다.
+`MAX_CONCURRENT_ASR` (세마포어)와 vLLM의 `--max-num-seqs`로 동시 처리량을 제어합니다.
 
 ## 파일 트리
 ```text
 .
 ├── Dockerfile
-├── docker-compose.yml
+├── docker-compose.yml          # --profile dev / prod
 ├── entrypoint.sh
 ├── .env.example
-├── pyproject.toml
-├── README.md
-├── docs/
-│   └── FAQ.md
+├── .env.dev                    # 개발용 (0.6B)
+├── .env.prod                   # 프로덕션 (1.7B)
 ├── api/
 │   ├── app.py
 │   └── schemas.py
 ├── audio/
 │   └── preprocess.py
 ├── clients/
+│   ├── asr_client.py           # vLLM HTTP 클라이언트 (커넥션 풀 + 세마포어)
+│   ├── diarization_client.py
 │   ├── rest_client.py
 │   └── ws_client.py
 ├── core/
@@ -39,12 +43,32 @@ WAS는 chunk를 그대로 프록시하고, GPU 서버가 세션/큐/전처리/pa
 │   └── e2e_smoke.py
 ├── storage/
 │   └── redis_store.py
-├── workers/
-│   └── chunk_worker.py
+├── ui/
+│   └── index.html
 └── tests/
     ├── test_backpressure.py
+    ├── test_asr_client.py
     ├── test_merge.py
     └── test_seq.py
+```
+
+## 빠른 시작
+
+### 개발용 (개인 PC, 0.6B 모델)
+```bash
+cp .env.dev .env
+docker compose --profile dev up -d --build
+```
+
+### 프로덕션 (B200 MIG 30GB, 1.7B 모델)
+```bash
+cp .env.prod .env
+docker compose --profile prod up -d --build
+```
+
+### 모델 다운로드 (온라인 PC)
+```bash
+./scripts/download_models.sh ./models
 ```
 
 ## API 요약
@@ -54,8 +78,7 @@ WAS는 chunk를 그대로 프록시하고, GPU 서버가 세션/큐/전처리/pa
 - finalize: `{type:"finalize", payload:{ssid}}`
 - status: `{type:"status", payload:{ssid}}`
 
-응답 이벤트
-- `ack`, `partial`, `final`, `error`
+응답 이벤트: `ack`, `partial`, `final`, `error`
 
 ### REST fallback
 - `POST /v1/sessions/`
@@ -64,109 +87,58 @@ WAS는 chunk를 그대로 프록시하고, GPU 서버가 세션/큐/전처리/pa
 - `GET /v1/sessions/{ssid}/status`
 - `GET /__ping`
 
-## 백프레셔 정책
-- Redis global queue 길이 기반 `backlog_hint`: `ok | slow_down | paused`
-- 큐 초과 시 REST는 `429`, WS는 `error`
-- `SESSION_QUEUE_LIMIT`, `GLOBAL_QUEUE_LIMIT`, 비율(`BACKPRESSURE_*`)로 튜닝
+### 프론트엔드 API (`/api/`)
+- `POST /api/session` → 세션 생성
+- `POST /api/session/{id}/chunk?seq=...&realtime=1` → 청크 업로드
+- `POST /api/session/{id}/stop` → 녹음 종료 (백그라운드 STT 재처리 + 화자분리 시작)
+- `POST /api/session/{id}/finalize` → 최종 결과 조회
+- `GET /api/session/{id}/status` → 상태 확인
 
-## 모델 다운로드 (온라인 PC)
-```bash
-./scripts/download_models.sh ./models
+## 모델 전환 (0.6B ↔ 1.7B)
+환경변수만 바꾸면 됩니다:
+| 환경 | VLLM_MODEL | VLLM_BASE_URL | MAX_CONCURRENT_ASR |
+|------|-----------|---------------|-------------------|
+| dev (0.6B) | `Qwen/Qwen3-ASR-0.6B` | `http://vllm-dev:8001` | 4 |
+| prod (1.7B) | `Qwen/Qwen3-ASR-1.7B` | `http://vllm-prod:8001` | 32 |
+
+## 100 커넥션 안정화 (프로덕션)
+- vLLM `--max-num-seqs 32`: 동시 추론 요청 수 (B200 MIG 30GB 기준)
+- `--gpu-memory-utilization 0.90`: GPU 메모리 활용률
+- `MAX_CONCURRENT_ASR=32`: API→vLLM 동시 요청 세마포어
+- vLLM이 자체 continuous batching으로 요청을 큐잉하므로, 32개 이상 요청이 와도 순서대로 처리됨
+- 5초 청크 × 100 커넥션 = 초당 ~20 요청, vLLM이 배칭으로 처리
+
+## 브라우저 UI 테스트
 ```
-
-## vLLM 실행 예시
-```bash
-docker run --rm --gpus all -p 8001:8001 \
-  -e HF_HUB_OFFLINE=1 \
-  -e TRANSFORMERS_OFFLINE=1 \
-  -e HF_DATASETS_OFFLINE=1 \
-  -v $(pwd)/models:/models \
-  vllm/vllm-openai:latest \
-  /models/Qwen3-ASR-1.7B \
-  --served-model-name Qwen/Qwen3-ASR-1.7B \
-  --host 0.0.0.0 --port 8001 \
-  --gpu-memory-utilization 0.80 \
-  --max-model-len 4096 \
-  --max-num-seqs 1 \
-  --max-num-batched-tokens 512 \
-  --enforce-eager
-```
-
-### 운영 권장안
-1. 온라인 PC에서 공통 산출물 준비
-   - `./scripts/download_models.sh ./models`
-   - `gpu-stt`(api/worker) 이미지 빌드+tar export
-2. 개인 PC(ROCm)에서 사전검증
-   - 가능하면 ROCm용 vLLM으로 `/v1/audio/transcriptions` 응답 확인
-   - 어려우면 `/v1/selftest/*` + WS/REST ingest/finalize smoke로 기능 검증
-3. 오프라인 서버(CUDA) 배포
-   - CUDA vLLM 이미지 + 동일한 `models/` + 동일한 api/worker 이미지 사용
-
-### 주의사항
-- ROCm에서 통과한 성능 수치(지연/처리량)를 CUDA에 그대로 대입하면 오차가 큽니다.
-- 따라서 성능튜닝은 반드시 최종 CUDA(MIG) 환경에서 재측정하세요.
-- 기능 검증(프로토콜/복구/큐/품질지표)은 ROCm에서도 충분히 선행 가능합니다.
-
-## 로컬 실행
-```bash
-cp .env.example .env
-docker compose up -d --build
-curl localhost:8000/__ping
-```
-
-
-## 브라우저 UI 테스트 (마이크/시스템 오디오)
-`/ui` 경로에 간단한 테스트 UI가 포함되어 있어 브라우저에서 바로 입력/결과를 검증할 수 있습니다.
-
-1. 서비스 기동
-```bash
-docker compose up -d --build
-```
-2. 브라우저 접속
-```text
 http://localhost:8000/ui
 ```
-3. UI에서 확인
-- 입력 소스: `마이크` 또는 `시스템 오디오(화면 공유)` 선택
-- `녹음 시작` 클릭 → chunk 단위 partial 결과 확인
-- `녹음 중지 + finalize` 클릭 → final 결과 확인
-- 필요 시 `API Base`를 원격 서버 주소(`http://<server-ip>:8000`)로 변경해 원격 API 연결 테스트
-
-> 참고: 시스템 오디오는 브라우저/OS 정책에 따라 `화면 공유 + 오디오 공유`를 허용해야 캡처됩니다.
-
-## 개인 PC Self-test
-- `/v1/selftest/model`: import/모델 로드 가능성 확인, GPU 없으면 graceful degrade
-- `/v1/selftest/diarization`: pyannote 파이프라인 로드 체크
-- `/v1/selftest/pipeline`: 전처리~파이프라인 스모크 경로 확인
+- 오프라인 회의: 마이크 녹음
+- 온라인 회의: 마이크 + 시스템 오디오 (화면 공유)
+- 파일 테스트: 오디오 파일 업로드
 
 ## diarization 토큰/오프라인 운영
-- diarization을 없앤 것이 아니라, **로컬 모델이 있으면 토큰 없이 오프라인으로 동작**하도록 했습니다.
-- 권장 절차는 다음과 같습니다.
+- 로컬 모델이 있으면 토큰 없이 오프라인으로 동작
+- 권장 절차:
   1. 온라인 PC에서 1회 라이선스 동의 + 토큰 발급
   2. `PYANNOTE_TOKEN=hf_xxx ./scripts/download_models.sh ./models` 실행
   3. 생성된 `./models/pyannote-speaker-diarization-community-1` 폴더를 오프라인 서버로 함께 이관
-- 런타임에는 `PYANNOTE_LOCAL_PATH`가 존재하면 해당 로컬 경로를 우선 사용합니다.
-- 로컬 경로가 없고 토큰도 없으면 diarization은 skip되며, finalize 응답 `meta.diarization_status`에서 원인을 확인할 수 있습니다.
+- 런타임에는 `PYANNOTE_LOCAL_PATH`가 존재하면 해당 로컬 경로를 우선 사용
 
 ## 오프라인 배포
-1. 온라인 PC에서 이미지 빌드 및 export
 ```bash
+# 온라인 PC에서
 docker build -t gpu-stt:latest .
 docker save gpu-stt:latest -o gpu-stt.tar
-```
-> 참고: 위 `gpu-stt:latest`는 API/worker + `/ui` 정적 페이지를 함께 포함한 이미지입니다. vLLM 이미지는 대상 GPU 스택(CUDA/ROCm)에 맞는 태그를 별도로 관리하세요.
 
-2. `gpu-stt.tar` + `models/`를 오프라인 GPU 서버로 이동
-3. 서버에서 import
-```bash
+# 오프라인 서버에서
 docker load -i gpu-stt.tar
 docker run --rm --gpus all --network host -v /opt/models:/models gpu-stt:latest
 ```
 
-## MIG(H200 ~20GB slice) 가이드
-- `WORKER_CONCURRENCY=1~2`로 시작
-- `chunk_sec=2`는 지연시간 유리, `4`는 처리량 유리
-- `--max-num-seqs`, `gpu-memory-utilization` 보수적 설정 권장
+## MIG(B200 30GB slice) 가이드
+- `--max-num-seqs 32`로 시작, 메모리 부족 시 하향
+- `chunk_sec=5`는 지연시간/품질 균형, `2`는 지연시간 유리
+- `--gpu-memory-utilization 0.90` 보수적 설정 권장
 
 ## 테스트
 ```bash

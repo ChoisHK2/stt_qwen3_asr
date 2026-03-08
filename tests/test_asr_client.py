@@ -20,30 +20,26 @@ class DummyClient:
     def __init__(self, payload, capture):
         self.payload = payload
         self.capture = capture
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        return False
+        self.is_closed = False
 
     async def post(self, url, json=None, **kwargs):
         self.capture["url"] = url
         self.capture["json"] = json
         return DummyResponse(self.payload)
 
+    async def aclose(self):
+        self.is_closed = True
 
-def test_transcribe_partial_uses_chat_completions_and_parses_response(monkeypatch):
+
+def test_transcribe_partial_uses_chat_completions_and_parses_response():
     capture = {}
+    dummy_client = DummyClient(
+        {"choices": [{"message": {"content": "hello"}}]},
+        capture,
+    )
 
-    def fake_client(*args, **kwargs):
-        return DummyClient(
-            {"choices": [{"message": {"content": "hello"}}]},
-            capture,
-        )
-
-    monkeypatch.setattr("clients.asr_client.httpx.AsyncClient", fake_client)
     cli = ASRClient()
+    cli._client = dummy_client
     audio = np.zeros(16000, dtype=np.float32)
 
     segs, err = asyncio.run(cli.transcribe_partial(audio, 16000))

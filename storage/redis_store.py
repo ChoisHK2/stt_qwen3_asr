@@ -71,15 +71,6 @@ class RedisStore:
         rows = await self.redis.lrange(self._partials_key(ssid), 0, -1)
         return [json.loads(r) for r in rows]
 
-    async def queue_length(self) -> int:
-        return await self.redis.llen("queue:chunks")
-
-    async def enqueue_chunk(self, payload: dict[str, Any]) -> int:
-        return await self.redis.rpush("queue:chunks", json.dumps(payload).encode())
-
-    async def dequeue_chunk(self, timeout: int = 1):
-        return await self.redis.blpop("queue:chunks", timeout=timeout)
-
     # ── STT Final re-processing keys ───────────────────────────────
 
     def _stt_final_key(self, ssid: str) -> str:
