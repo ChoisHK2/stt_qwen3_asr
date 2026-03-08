@@ -22,19 +22,20 @@ class DummyClient:
         self.capture = capture
         self.is_closed = False
 
-    async def post(self, url, json=None, **kwargs):
+    async def post(self, url, files=None, data=None, **kwargs):
         self.capture["url"] = url
-        self.capture["json"] = json
+        self.capture["files"] = files
+        self.capture["data"] = data
         return DummyResponse(self.payload)
 
     async def aclose(self):
         self.is_closed = True
 
 
-def test_transcribe_partial_uses_chat_completions_and_parses_response():
+def test_transcribe_partial_uses_transcriptions_endpoint_and_parses_response():
     capture = {}
     dummy_client = DummyClient(
-        {"choices": [{"message": {"content": "hello"}}]},
+        {"text": "hello"},
         capture,
     )
 
@@ -47,9 +48,11 @@ def test_transcribe_partial_uses_chat_completions_and_parses_response():
     assert err is None
     assert len(segs) == 1
     assert segs[0].text == "hello"
-    assert "/v1/chat/completions" in capture["url"]
-    messages = capture["json"]["messages"]
-    assert messages[0]["role"] == "user"
-    content = messages[0]["content"]
-    assert content[0]["type"] == "audio_url"
-    assert content[0]["audio_url"]["url"].startswith("data:audio/wav;base64,")
+    assert "/v1/audio/transcriptions" in capture["url"]
+    # multipart: file field should be a tuple (filename, bytes, content_type)
+    assert "file" in capture["files"]
+    file_tuple = capture["files"]["file"]
+    assert file_tuple[0] == "audio.wav"
+    assert file_tuple[2] == "audio/wav"
+    # model should be sent as form data
+    assert "model" in capture["data"]

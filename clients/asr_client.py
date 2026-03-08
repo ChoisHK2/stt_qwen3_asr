@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import io
 import logging
 import wave
@@ -18,8 +17,9 @@ logger = logging.getLogger("qwen3-asr.asr_client")
 class ASRClient:
     """vLLM 기반 ASR 클라이언트.
 
+    - /v1/audio/transcriptions 엔드포인트 사용 (OpenAI 호환)
     - httpx 커넥션 풀을 재사용하여 연결 오버헤드 제거
-    - asyncio.Semaphore로 동시 요청 수 제한 (vLLM이 자체 큐잉하므로 과도한 요청 방지용)
+    - asyncio.Semaphore로 동시 요청 수 제한
     """
 
     def __init__(self):
@@ -53,48 +53,25 @@ class ASRClient:
             w.writeframes(audio_i16.tobytes())
         return buff.getvalue()
 
-    def _parse_chat_response(self, data: dict, audio: np.ndarray, sample_rate: int) -> list[ASRSegment]:
-        text = ""
-        choices = data.get("choices")
-        if choices and len(choices) > 0:
-            text = choices[0].get("message", {}).get("content", "").strip()
-
+    def _parse_transcription_response(self, data: dict, audio: np.ndarray, sample_rate: int) -> list[ASRSegment]:
+        text = data.get("text", "").strip()
         duration = len(audio) / sample_rate
-        if text:
-            return [ASRSegment(start=0.0, end=duration, text=text, words=[])]
-        return [ASRSegment(start=0.0, end=duration, text="", words=[])]
+        return [ASRSegment(start=0.0, end=duration, text=text, words=[])]
 
     async def transcribe_partial(self, audio: np.ndarray, sample_rate: int) -> tuple[list[ASRSegment], str | None]:
         wav_bytes = self._to_wav_bytes(audio, sample_rate)
-        audio_b64 = base64.b64encode(wav_bytes).decode()
-
-        payload = {
-            "model": self.settings.vllm_model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "audio_url",
-                            "audio_url": {
-                                "url": f"data:audio/wav;base64,{audio_b64}",
-                            },
-                        },
-                    ],
-                },
-            ],
-        }
 
         async with self._semaphore:
             try:
                 client = await self._get_client()
                 resp = await client.post(
-                    f"{self.settings.vllm_base_url}/v1/chat/completions",
-                    json=payload,
+                    f"{self.settings.vllm_base_url}/v1/audio/transcriptions",
+                    files={"file": ("audio.wav", wav_bytes, "audio/wav")},
+                    data={"model": self.settings.vllm_model},
                 )
                 resp.raise_for_status()
                 result = resp.json()
-                return self._parse_chat_response(result, audio, sample_rate), None
+                return self._parse_transcription_response(result, audio, sample_rate), None
             except Exception as exc:
                 logger.warning("ASR transcribe error: %s", exc)
                 fallback = [ASRSegment(start=0.0, end=len(audio) / sample_rate, text="", words=[])]
