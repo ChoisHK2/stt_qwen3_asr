@@ -1,22 +1,40 @@
 from __future__ import annotations
 
+import logging
+import os
 import wave
 
 import numpy as np
 
 from core.models import DiarTurn
 
+logger = logging.getLogger("qwen3-asr.diarization")
+
 
 class DiarizationClient:
     def __init__(self):
         self.pipeline = None
 
-    def load(self, model_name: str, token: str | None = None, device: str = "cpu"):
-        from pyannote.audio import Pipeline  # delayed import for graceful selftest
+    def load(self, model_path: str, token: str | None = None, device: str = "cpu"):
+        from pyannote.audio import Pipeline
         import torch
 
-        kwargs = {"use_auth_token": token} if token else {}
-        self.pipeline = Pipeline.from_pretrained(model_name, **kwargs)
+        config_path = os.path.join(model_path, "config.yaml")
+
+        if os.path.isfile(config_path):
+            # 오프라인: 로컬 config.yaml에서 로드 (하위 모델 경로 포함)
+            logger.info("Loading pyannote pipeline from local config: %s", config_path)
+            self.pipeline = Pipeline.from_pretrained(config_path)
+        elif token:
+            # 온라인: HuggingFace에서 직접 로드
+            logger.info("Loading pyannote pipeline from HuggingFace: %s", model_path)
+            self.pipeline = Pipeline.from_pretrained(model_path, use_auth_token=token)
+        else:
+            raise RuntimeError(
+                f"No config.yaml found at {config_path} and no PYANNOTE_TOKEN set. "
+                f"Run scripts/download_models.sh to download pyannote models."
+            )
+
         self.pipeline.to(torch.device(device))
 
     def diarize(self, wav_path: str) -> list[DiarTurn]:
