@@ -32,6 +32,13 @@ async def startup():
     app.state.session_service = SessionService(store)
 
 
+@app.on_event("shutdown")
+async def shutdown():
+    svc = getattr(app.state, "session_service", None)
+    if svc:
+        await svc.close()
+
+
 @app.get("/__ping")
 async def ping():
     return "OK"
@@ -139,7 +146,7 @@ async def api_upload_chunk(
         session_id, seq, raw, realtime=bool(realtime),
     )
     if result.get("error"):
-        code = 429 if result["error"] in ("GLOBAL_QUEUE_FULL", "SESSION_STOPPED") else 413
+        code = 429 if result["error"] in ("AUDIO_LIMIT_EXCEEDED", "SESSION_STOPPED") else 413
         raise HTTPException(status_code=code, detail=result["error"])
     return {
         "session_id": session_id,

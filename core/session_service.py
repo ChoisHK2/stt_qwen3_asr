@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import io
 import logging
 import os
 import wave
@@ -26,6 +25,9 @@ class SessionService:
         self.settings = get_settings()
         self.asr = ASRClient()
         self.diar = DiarizationClient()
+
+    async def close(self):
+        await self.asr.close()
 
     async def start_session(self, sample_rate: int, channels: int, chunk_sec: int = 2, ssid: str | None = None):
         ssid = ssid or str(ulid.new())
@@ -52,9 +54,6 @@ class SessionService:
         if meta.get("is_stopped"):
             return {"error": "SESSION_STOPPED", "backlog_hint": "paused"}
 
-        if await self.store.queue_length() >= self.settings.global_queue_limit:
-            return {"error": "GLOBAL_QUEUE_FULL", "backlog_hint": "paused"}
-
         # Audio duration limit
         pcm_total = await self.store.append_pcm(ssid, raw)
         new_duration = (pcm_total / 2) / sample_rate
@@ -66,7 +65,7 @@ class SessionService:
             status = await self.store.get_status(ssid)
             return {
                 "accepted_seq": status.get("last_accepted_seq", seq),
-                "backlog_hint": status.get("backlog_hint", "ok"),
+                "backlog_hint": "ok",
                 "duplicate": True,
             }
 
@@ -79,26 +78,12 @@ class SessionService:
         start_ms = int(start_sample * 1000 / sample_rate)
         end_ms = int(end_sample * 1000 / sample_rate)
 
-        qsize = await self.store.enqueue_chunk(
-            {
-                "ssid": ssid,
-                "seq": seq,
-                "sample_rate": sample_rate,
-            }
-        )
-        backlog_hint = "ok"
-        if qsize >= int(self.settings.global_queue_limit * self.settings.backpressure_pause_ratio):
-            backlog_hint = "paused"
-        elif qsize >= int(self.settings.global_queue_limit * self.settings.backpressure_slow_ratio):
-            backlog_hint = "slow_down"
-
         chunk_count = int(meta.get("chunk_count", 0)) + 1
         await self.store.set_status(
             ssid,
             {
                 "last_accepted_seq": seq,
-                "backlog_hint": backlog_hint,
-                "queue_length": qsize,
+                "backlog_hint": "ok",
                 "audio_metrics": metrics.__dict__,
                 "chunk_count": chunk_count,
             },
@@ -108,14 +93,14 @@ class SessionService:
         if not realtime:
             return {
                 "accepted_seq": seq,
-                "backlog_hint": backlog_hint,
+                "backlog_hint": "ok",
                 "partial_text": "",
                 "audio_metrics": metrics.__dict__,
                 "start_ms": start_ms,
                 "end_ms": end_ms,
             }
 
-        # realtime=True: 실시간 STT 수행
+        # realtime=True: 실시간 STT 수행 (vLLM이 자체 큐잉/배칭 처리)
         asr_error = None
         if self.settings.partial_mode == "on":
             segs, asr_error = await self.asr.transcribe_partial(audio, sample_rate)
@@ -134,7 +119,7 @@ class SessionService:
 
         response = {
             "accepted_seq": seq,
-            "backlog_hint": backlog_hint,
+            "backlog_hint": "ok",
             "partial_text": partial_text,
             "audio_metrics": metrics.__dict__,
             "start_ms": start_ms,

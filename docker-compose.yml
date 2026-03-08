@@ -1,11 +1,58 @@
+# docker compose --profile dev up     → 0.6B (개인 PC, 소형 GPU)
+# docker compose --profile prod up    → 1.7B (B200 MIG 30GB, 100 커넥션)
 services:
   redis:
     image: redis:7
     ports:
       - "6379:6379"
 
-  vllm:
+  # ── 개발용: 0.6B 모델 (VRAM 2~4GB) ──────────────────────────────
+  vllm-dev:
     image: vllm/vllm-openai:latest
+    profiles: ["dev"]
+    environment:
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_DATASETS_OFFLINE: "1"
+    command:
+      - /models/Qwen3-ASR-0.6B
+      - --served-model-name
+      - Qwen/Qwen3-ASR-0.6B
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8001"
+      - --gpu-memory-utilization
+      - "0.85"
+      - --max-model-len
+      - "4096"
+      - --max-num-seqs
+      - "4"
+      - --enforce-eager
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./models:/models
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=2).read()"
+      interval: 10s
+      timeout: 3s
+      retries: 60
+      start_period: 120s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+
+  # ── 프로덕션: 1.7B 모델 (B200 MIG 30GB, 100 커넥션) ─────────────
+  vllm-prod:
+    image: vllm/vllm-openai:latest
+    profiles: ["prod"]
     environment:
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
@@ -19,12 +66,11 @@ services:
       - --port
       - "8001"
       - --gpu-memory-utilization
-      - "0.80"
+      - "0.90"
       - --max-model-len
       - "4096"
       - --max-num-seqs
-      - "1"
-      - --enforce-eager
+      - "32"
     ports:
       - "8001:8001"
     volumes:
@@ -48,30 +94,11 @@ services:
   api:
     build: .
     env_file: .env
-    command: ["api"]
     depends_on:
       redis:
         condition: service_started
-      vllm:
-        condition: service_healthy
     ports:
       - "8000:8000"
     volumes:
       - ./models:/models
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - capabilities: [gpu]
-
-  worker:
-    build: .
-    env_file: .env
-    command: ["worker"]
-    depends_on:
-      redis:
-        condition: service_started
-      vllm:
-        condition: service_healthy
-    volumes:
-      - ./models:/models
+      - ./data:/app/data
