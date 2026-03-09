@@ -54,6 +54,10 @@ vLLM은 continuous batching으로 동시 요청을 자체 관리합니다.
 
 ## 빠른 시작
 
+### 사전 요구사항
+- NVIDIA GPU 드라이버 + [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) 설치
+- 중국 대륙에서 Docker Hub 접근이 느린 경우 registry mirror 설정 권장
+
 ### 개발용 (개인 PC, 0.6B 모델)
 ```bash
 cp .env.dev .env
@@ -70,6 +74,10 @@ docker compose --profile prod up -d --build
 ```bash
 ./scripts/download_models.sh ./models
 ```
+
+> **참고**: vLLM 서빙에 `qwenllm/qwen3-asr:latest` 공식 Docker 이미지를 사용합니다.
+> 이 이미지에 오디오 처리에 필요한 모든 의존성(soundfile, librosa 등)이 포함되어 있으며,
+> `qwen-asr-serve` 명령어로 vLLM 서버를 시작합니다.
 
 ## API 요약
 ### WS `/v1/ws`
@@ -127,12 +135,16 @@ http://localhost:8000/ui
 ## 오프라인 배포
 ```bash
 # 온라인 PC에서
+docker pull qwenllm/qwen3-asr:latest
+docker save qwenllm/qwen3-asr:latest -o qwen3-asr.tar
 docker build -t gpu-stt:latest .
 docker save gpu-stt:latest -o gpu-stt.tar
 
 # 오프라인 서버에서
+docker load -i qwen3-asr.tar
 docker load -i gpu-stt.tar
-docker run --rm --gpus all --network host -v /opt/models:/models gpu-stt:latest
+cp .env.dev .env   # 또는 .env.prod
+docker compose --profile dev up -d
 ```
 
 ## MIG(B200 30GB slice) 가이드
