@@ -21,7 +21,7 @@ class Settings:
     vllm_model: str = "Qwen/Qwen3-ASR-0.6B"
     asr_timeout_sec: int = 30
     pyannote_model: str = "pyannote/speaker-diarization-community-1"
-    pyannote_local_path: str = "/models/pyannote-speaker-diarization"
+    pyannote_local_path: str = "/models/pyannote/speaker-diarization-community-1"
     pyannote_token: str | None = None
     diar_device: str = "cpu"
     matching_fallback: str = "segment_majority"
@@ -60,7 +60,7 @@ def get_settings() -> Settings:
         vllm_model=os.getenv("VLLM_MODEL", "Qwen/Qwen3-ASR-0.6B"),
         asr_timeout_sec=int(os.getenv("ASR_TIMEOUT_SEC", "30")),
         pyannote_model=os.getenv("PYANNOTE_MODEL", "pyannote/speaker-diarization-community-1"),
-        pyannote_local_path=os.getenv("PYANNOTE_LOCAL_PATH", "/models/pyannote-speaker-diarization"),
+        pyannote_local_path=os.getenv("PYANNOTE_LOCAL_PATH", "/models/pyannote/speaker-diarization-community-1"),
         pyannote_token=os.getenv("PYANNOTE_TOKEN") or None,
         diar_device=os.getenv("DIAR_DEVICE", "cpu"),
         matching_fallback=os.getenv("MATCHING_FALLBACK", "segment_majority"),
