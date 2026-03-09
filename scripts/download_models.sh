@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# 사용법:
+#   ./scripts/download_models.sh ./models
+#   PYANNOTE_TOKEN=hf_xxx ./scripts/download_models.sh ./models
+#
+# Docker 내부 경로: /models
+# 로컬 개발 경로:   ./models
+#
+# pyannote config.yaml은 상대경로로 생성되므로
+# Docker에서도 로컬에서도 동일하게 동작합니다.
+
 OUT_DIR="${1:-./models}"
 mkdir -p "$OUT_DIR"
 
@@ -27,11 +37,8 @@ snapshot_download(
 print("✓ Downloaded Qwen3-ASR-0.6B")
 
 # ── pyannote (오프라인용 하위 모델 포함) ───────────────────────
-# pyannote 파이프라인은 config.yaml + 하위 모델 2개가 필요
-# snapshot_download로는 config.yaml만 받고 하위 모델은 HF repo ID라 오프라인 불가
-# → 하위 모델도 직접 다운로드 + 로컬 경로용 config.yaml 생성
-
-pyannote_dir = f"{out_dir}/pyannote-speaker-diarization"
+# 기존 프로젝트 구조에 맞춤: models/pyannote/speaker-diarization-community-1/
+pyannote_dir = f"{out_dir}/pyannote/speaker-diarization-community-1"
 os.makedirs(pyannote_dir, exist_ok=True)
 
 # 1) segmentation model
@@ -54,18 +61,20 @@ snapshot_download(
 )
 print("✓ Downloaded pyannote/wespeaker-voxceleb-resnet34-LM")
 
-# 3) config.yaml (로컬 경로 참조)
-config_yaml = f"""\
+# 3) config.yaml (상대경로 사용 → Docker/로컬 모두 호환)
+#    pyannote Pipeline.from_pretrained(dir) 는 config.yaml 내 경로가
+#    상대경로이면 config.yaml 기준으로 해석합니다.
+config_yaml = """\
 version: 3.1.0
 
 pipeline:
   name: pyannote.audio.pipelines.SpeakerDiarization
   params:
     clustering: AgglomerativeClustering
-    embedding: {os.path.abspath(emb_dir)}/pytorch_model.bin
+    embedding: wespeaker-voxceleb-resnet34-LM/pytorch_model.bin
     embedding_batch_size: 32
     embedding_exclude_overlap: true
-    segmentation: {os.path.abspath(seg_dir)}/pytorch_model.bin
+    segmentation: segmentation-3.0/pytorch_model.bin
     segmentation_batch_size: 32
 
 params:
@@ -83,4 +92,6 @@ with open(config_path, "w") as f:
 
 print(f"✓ Created pyannote config: {config_path}")
 print(f"\nDone! Models saved to: {out_dir}")
+print(f"  Qwen3-ASR:  {out_dir}/Qwen3-ASR-{{0.6B,1.7B}}")
+print(f"  pyannote:   {pyannote_dir}")
 PY

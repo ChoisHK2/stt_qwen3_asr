@@ -1,12 +1,21 @@
-# docker compose --profile dev up     → 0.6B (개인 PC, 소형 GPU)
-# docker compose --profile prod up    → 1.7B (B200 MIG 30GB, 100 커넥션)
+# ============================================================
+# docker-compose.yml (선택사항)
+#
+# 기본 사용법은 올인원 이미지입니다:
+#   docker build -t qwen3-stt .
+#   docker run --gpus all --env-file .env -v ./models:/models -p 8000:8000 qwen3-stt
+#
+# 멀티 노드/GPU 분리가 필요한 경우에만 이 compose를 사용하세요:
+#   docker compose --profile dev up     → 0.6B
+#   docker compose --profile prod up    → 1.7B
+# ============================================================
 services:
   redis:
     image: redis:7
     ports:
       - "6379:6379"
 
-  # ── 개발용: 0.6B 모델 (VRAM 2~4GB) ──────────────────────────────
+  # ── 개발용: 0.6B 모델 ─────────────────────────────────────
   vllm-dev:
     image: qwenllm/qwen3-asr:latest
     profiles: ["dev"]
@@ -50,7 +59,7 @@ services:
           devices:
             - capabilities: [gpu]
 
-  # ── 프로덕션: 1.7B 모델 (B200 MIG 30GB, 100 커넥션) ─────────────
+  # ── 프로덕션: 1.7B 모델 ───────────────────────────────────
   vllm-prod:
     image: qwenllm/qwen3-asr:latest
     profiles: ["prod"]
@@ -93,9 +102,13 @@ services:
           devices:
             - capabilities: [gpu]
 
+  # compose 사용시 API: .env에서 REDIS_URL과 VLLM_BASE_URL을 서비스명으로 설정
+  # 예: REDIS_URL=redis://redis:6379/0, VLLM_BASE_URL=http://vllm-dev:8001
   api:
     build: .
     env_file: .env
+    # compose 모드에서는 entrypoint의 Redis/vLLM 기동을 스킵
+    command: ["uvicorn", "api.app:app", "--host", "0.0.0.0", "--port", "8000"]
     depends_on:
       redis:
         condition: service_started

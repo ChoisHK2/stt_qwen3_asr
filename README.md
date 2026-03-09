@@ -3,54 +3,30 @@
 FastAPI 기반 실시간 STT 서버. vLLM으로 Qwen3-ASR 모델을 서빙하고, pyannote로 화자분리를 수행합니다.
 
 ## 아키텍처
+
+올인원 Docker 이미지 (`qwenllm/qwen3-asr` 기반):
+- **하나의 컨테이너**에 Redis + vLLM(qwen-asr-serve) + FastAPI 통합
+- `docker build` → `docker run` 한 번으로 전체 서비스 기동
+
+```
+┌─ Docker Container ──────────────────────────┐
+│  Redis (6379)  ←  FastAPI (8000)  →  vLLM (8001)  │
+│                     ↕                              │
+│              pyannote diarization                   │
+└─────────────────────────────────────────────┘
+```
+
+### 주요 모듈
 - `api/`: FastAPI WS(`/v1/ws`) + REST fallback
 - `core/`: 설정, 세션 서비스, diarization-ASR 매칭, merge 정책
 - `audio/`: PCM16 전처리(증폭/노이즈제거/품질지표)
 - `storage/`: Redis 기반 TTL/복구/idempotency 저장소
-- `clients/`: ASR/diarization 클라이언트 + WS/REST 샘플
+- `clients/`: ASR(chat completions) / diarization 클라이언트
 
 ### vLLM 자체 큐잉 활용
 vLLM은 continuous batching으로 동시 요청을 자체 관리합니다.
 별도의 Redis 큐/워커 없이, API에서 직접 vLLM HTTP API를 호출합니다.
 `MAX_CONCURRENT_ASR` (세마포어)와 vLLM의 `--max-num-seqs`로 동시 처리량을 제어합니다.
-
-## 파일 트리
-```text
-.
-├── Dockerfile
-├── docker-compose.yml          # --profile dev / prod
-├── entrypoint.sh
-├── .env.example
-├── .env.dev                    # 개발용 (0.6B)
-├── .env.prod                   # 프로덕션 (1.7B)
-├── api/
-│   ├── app.py
-│   └── schemas.py
-├── audio/
-│   └── preprocess.py
-├── clients/
-│   ├── asr_client.py           # vLLM HTTP 클라이언트 (커넥션 풀 + 세마포어)
-│   ├── diarization_client.py
-│   ├── rest_client.py
-│   └── ws_client.py
-├── core/
-│   ├── config.py
-│   ├── matching.py
-│   ├── models.py
-│   └── session_service.py
-├── scripts/
-│   ├── download_models.sh
-│   └── e2e_smoke.py
-├── storage/
-│   └── redis_store.py
-├── ui/
-│   └── index.html
-└── tests/
-    ├── test_backpressure.py
-    ├── test_asr_client.py
-    ├── test_merge.py
-    └── test_seq.py
-```
 
 ## 빠른 시작
 
@@ -58,26 +34,56 @@ vLLM은 continuous batching으로 동시 요청을 자체 관리합니다.
 - NVIDIA GPU 드라이버 + [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) 설치
 - 중국 대륙에서 Docker Hub 접근이 느린 경우 registry mirror 설정 권장
 
-### 개발용 (개인 PC, 0.6B 모델)
-```bash
-cp .env.dev .env
-docker compose --profile dev up -d --build
-```
-
-### 프로덕션 (B200 MIG 30GB, 1.7B 모델)
-```bash
-cp .env.prod .env
-docker compose --profile prod up -d --build
-```
-
-### 모델 다운로드 (온라인 PC)
+### 1. 모델 다운로드
 ```bash
 ./scripts/download_models.sh ./models
 ```
 
-> **참고**: vLLM 서빙에 `qwenllm/qwen3-asr:latest` 공식 Docker 이미지를 사용합니다.
-> 이 이미지에 오디오 처리에 필요한 모든 의존성(soundfile, librosa 등)이 포함되어 있으며,
-> `qwen-asr-serve` 명령어로 vLLM 서버를 시작합니다.
+### 2. 이미지 빌드 + 실행
+
+**개발용 (0.6B)**
+```bash
+cp .env.dev .env
+docker build -t qwen3-stt .
+docker run --gpus all --env-file .env \
+  -v ./models:/models \
+  -p 8000:8000 \
+  qwen3-stt
+```
+
+**프로덕션 (1.7B)**
+```bash
+cp .env.prod .env
+docker build -t qwen3-stt .
+docker run --gpus all --env-file .env \
+  -v ./models:/models \
+  -p 8000:8000 \
+  qwen3-stt
+```
+
+컨테이너가 뜨면 Redis → vLLM → FastAPI 순서로 자동 기동됩니다.
+vLLM이 준비될 때까지 대기 후 API가 시작됩니다.
+
+> **참고**: `qwenllm/qwen3-asr:latest` 공식 이미지를 base로 사용합니다.
+> 오디오 처리에 필요한 모든 의존성(soundfile, librosa, vLLM 등)이 포함되어 있습니다.
+
+### (선택) docker-compose 멀티 서비스 모드
+GPU를 분리하거나 스케일링이 필요한 경우:
+```bash
+docker compose --profile dev up -d --build   # 또는 --profile prod
+```
+
+## 모델 디렉토리 구조
+```
+models/
+├── Qwen3-ASR-0.6B/          # 개발용 ASR 모델
+├── Qwen3-ASR-1.7B/          # 프로덕션 ASR 모델
+└── pyannote/
+    └── speaker-diarization-community-1/
+        ├── config.yaml       # 상대경로 참조 (Docker/로컬 모두 호환)
+        ├── segmentation-3.0/
+        └── wespeaker-voxceleb-resnet34-LM/
+```
 
 ## API 요약
 ### WS `/v1/ws`
@@ -103,11 +109,11 @@ docker compose --profile prod up -d --build
 - `GET /api/session/{id}/status` → 상태 확인
 
 ## 모델 전환 (0.6B ↔ 1.7B)
-환경변수만 바꾸면 됩니다:
-| 환경 | VLLM_MODEL | VLLM_BASE_URL | MAX_CONCURRENT_ASR |
-|------|-----------|---------------|-------------------|
-| dev (0.6B) | `Qwen/Qwen3-ASR-0.6B` | `http://vllm-dev:8001` | 4 |
-| prod (1.7B) | `Qwen/Qwen3-ASR-1.7B` | `http://vllm-prod:8001` | 32 |
+`.env` 파일만 바꾸면 됩니다:
+| 환경 | .env 파일 | VLLM_MODEL | MAX_CONCURRENT_ASR |
+|------|----------|-----------|-------------------|
+| dev (0.6B) | `.env.dev` | `Qwen/Qwen3-ASR-0.6B` | 4 |
+| prod (1.7B) | `.env.prod` | `Qwen/Qwen3-ASR-1.7B` | 32 |
 
 ## 100 커넥션 안정화 (프로덕션)
 - vLLM `--max-num-seqs 32`: 동시 추론 요청 수 (B200 MIG 30GB 기준)
@@ -129,22 +135,19 @@ http://localhost:8000/ui
 - 권장 절차:
   1. 온라인 PC에서 1회 라이선스 동의 + 토큰 발급
   2. `PYANNOTE_TOKEN=hf_xxx ./scripts/download_models.sh ./models` 실행
-  3. 생성된 `./models/pyannote-speaker-diarization-community-1` 폴더를 오프라인 서버로 함께 이관
+  3. 생성된 `./models/pyannote/speaker-diarization-community-1` 폴더를 오프라인 서버로 함께 이관
 - 런타임에는 `PYANNOTE_LOCAL_PATH`가 존재하면 해당 로컬 경로를 우선 사용
 
 ## 오프라인 배포
 ```bash
 # 온라인 PC에서
-docker pull qwenllm/qwen3-asr:latest
-docker save qwenllm/qwen3-asr:latest -o qwen3-asr.tar
-docker build -t gpu-stt:latest .
-docker save gpu-stt:latest -o gpu-stt.tar
+docker build -t qwen3-stt:latest .
+docker save qwen3-stt:latest -o qwen3-stt.tar
 
 # 오프라인 서버에서
-docker load -i qwen3-asr.tar
-docker load -i gpu-stt.tar
+docker load -i qwen3-stt.tar
 cp .env.dev .env   # 또는 .env.prod
-docker compose --profile dev up -d
+docker run --gpus all --env-file .env -v ./models:/models -p 8000:8000 qwen3-stt
 ```
 
 ## MIG(B200 30GB slice) 가이드
