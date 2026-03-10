@@ -122,9 +122,39 @@ models/
 - vLLM이 자체 continuous batching으로 요청을 큐잉하므로, 32개 이상 요청이 와도 순서대로 처리됨
 - 5초 청크 × 100 커넥션 = 초당 ~20 요청, vLLM이 배칭으로 처리
 
+## HTTPS 지원
+
+기본은 HTTP. SSL 인증서를 마운트하면 HTTPS가 활성화됩니다.
+
+```bash
+# 인증서 준비 (cert/ 디렉토리에 key.pem, cert.pem)
+docker run --gpus all --env-file .env \
+  -v ./models:/models \
+  -v ./cert:/cert \
+  -e SSL_KEYFILE=/cert/key.pem \
+  -e SSL_CERTFILE=/cert/cert.pem \
+  -p 8000:8000 \
+  qwen3-stt
+```
+
+**HTTPS 영향 범위:**
+- 외부 접속 (UI, REST, WebSocket): `https://ip:8000`, `wss://ip:8000/v1/ws`
+- 컨테이너 내부 (FastAPI→vLLM, FastAPI→Redis): HTTP 유지, 영향 없음
+
+> 자체서명 인증서 생성: `openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout cert/key.pem -out cert/cert.pem`
+
+## 포트 변경
+
+기본 포트(8000)가 사용 중이면 `.env`에서 `APP_PORT`를 변경하고 `-p` 옵션도 맞춰줍니다:
+```bash
+# .env에서 APP_PORT=8010 설정 후:
+docker run --gpus all --env-file .env -v ./models:/models -p 8010:8010 qwen3-stt
+```
+
 ## 브라우저 UI 테스트
 ```
-http://localhost:8000/ui
+http://localhost:8000/ui    (HTTP)
+https://localhost:8000/ui   (HTTPS 설정 시)
 ```
 - 오프라인 회의: 마이크 녹음
 - 온라인 회의: 마이크 + 시스템 오디오 (화면 공유)
@@ -146,9 +176,23 @@ docker save qwen3-stt:latest -o qwen3-stt.tar
 
 # 오프라인 서버에서
 docker load -i qwen3-stt.tar
-cp .env.dev .env   # 또는 .env.prod
+cp .env.prod .env
 docker run --gpus all --env-file .env -v ./models:/models -p 8000:8000 qwen3-stt
 ```
+
+### 오프라인에서 코드만 수정 후 재빌드
+이미 빌드된 `qwen3-stt:latest` 이미지 위에 패치 이미지를 만들 수 있습니다:
+```dockerfile
+# Dockerfile.fix
+FROM qwen3-stt:latest
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+# 필요시 다른 파일도 COPY
+```
+```bash
+docker build -f Dockerfile.fix -t qwen3-stt:fixed .
+```
+베이스 이미지를 다시 받을 필요 없이 수 초 만에 빌드됩니다.
 
 ## MIG(B200 30GB slice) 가이드
 - `--max-num-seqs 32`로 시작, 메모리 부족 시 하향

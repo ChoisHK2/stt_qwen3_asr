@@ -35,6 +35,8 @@ class Settings:
     max_session_audio_sec: int = 7200  # 세션당 최대 오디오 길이(초)
     finalize_async_threshold_sec: float = 480
     model_dir: str = "/models"
+    ssl_keyfile: str = ""
+    ssl_certfile: str = ""
 
 
 def _env_bool(key: str, default: bool) -> bool:
@@ -74,4 +76,6 @@ def get_settings() -> Settings:
         max_session_audio_sec=int(os.getenv("MAX_SESSION_AUDIO_SEC", "7200")),
         finalize_async_threshold_sec=float(os.getenv("FINALIZE_ASYNC_THRESHOLD_SEC", "480")),
         model_dir=os.getenv("MODEL_DIR", "/models"),
+        ssl_keyfile=os.getenv("SSL_KEYFILE", ""),
+        ssl_certfile=os.getenv("SSL_CERTFILE", ""),
     )
