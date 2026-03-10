@@ -1,0 +1,9 @@
+models/
+data/
+.git/
+__pycache__/
+*.pyc
+.env
+.env.*
+*.tar
+cert/

@@ -1,12 +1,27 @@
 # ============================================================
 # 올인원 이미지: qwenllm/qwen3-asr (vLLM + 오디오 처리) 기반
 # Redis + vLLM(qwen-asr-serve) + FastAPI를 하나의 컨테이너에서 실행
+#
+# 빌드:  docker build -t qwen3-stt .
+# HTTP:  docker run --gpus all --env-file .env -v ./models:/models -p 8000:8000 qwen3-stt
+# HTTPS: docker run --gpus all --env-file .env -v ./models:/models -v ./cert:/cert \
+#          -e SSL_KEYFILE=/cert/key.pem -e SSL_CERTFILE=/cert/cert.pem -p 8000:8000 qwen3-stt
 # ============================================================
 FROM qwenllm/qwen3-asr:latest
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
+
+# ── 프록시 환경변수 완전 해제 (오프라인 환경 안전) ─────────
+ENV http_proxy= \
+    https_proxy= \
+    HTTP_PROXY= \
+    HTTPS_PROXY= \
+    no_proxy= \
+    NO_PROXY= \
+    ALL_PROXY=
+RUN sed -i '/proxy=/Id' /etc/environment || true
 
 # Redis 설치 (인메모리 세션 스토어)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -45,6 +60,10 @@ ENV APP_HOST=0.0.0.0
 ENV APP_PORT=8000
 ENV REDIS_URL=redis://localhost:6379/0
 ENV VLLM_BASE_URL=http://localhost:8001
+
+# HTTPS (선택사항 - 비어있으면 HTTP)
+ENV SSL_KEYFILE=""
+ENV SSL_CERTFILE=""
 
 EXPOSE 8000 8001
 
