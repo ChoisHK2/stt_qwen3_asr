@@ -243,18 +243,74 @@ def _distribute_words_by_time(
     return result
 
 
+def _merge_same_speaker_diar(diar: list[DiarTurn]) -> list[DiarTurn]:
+    """연속 동일 화자의 diar turn을 하나로 병합한다.
+
+    pyannote가 같은 화자를 여러 짧은 turn으로 쪼개는 경우가 많다.
+    매칭 전에 병합하면 텍스트 분배가 정확해지고, 최종 결과도 깔끔해진다.
+    """
+    if not diar:
+        return []
+    sorted_diar = sorted(diar, key=lambda d: d.start)
+    merged: list[DiarTurn] = [DiarTurn(
+        speaker=sorted_diar[0].speaker,
+        start=sorted_diar[0].start,
+        end=sorted_diar[0].end,
+    )]
+    for d in sorted_diar[1:]:
+        prev = merged[-1]
+        if d.speaker == prev.speaker:
+            # 동일 화자 → 시간 확장 (사이 갭 포함)
+            prev.end = max(prev.end, d.end)
+        else:
+            merged.append(DiarTurn(speaker=d.speaker, start=d.start, end=d.end))
+    return merged
+
+
+def _fill_diar_gaps(diar: list[DiarTurn], audio_end: float) -> list[DiarTurn]:
+    """diar turn 사이의 갭을 앞뒤 화자에게 할당하여 텍스트 누락을 방지한다.
+
+    갭의 중간점을 기준으로 앞 turn과 뒤 turn에 나눠 할당한다.
+    - 오디오 시작 전 갭: 첫 turn에 할당
+    - 오디오 끝 후 갭: 마지막 turn에 할당
+    """
+    if not diar:
+        return []
+
+    filled = [DiarTurn(speaker=d.speaker, start=d.start, end=d.end) for d in diar]
+
+    # 시작 부분 갭: 첫 turn이 0초부터 시작하지 않으면
+    if filled[0].start > 0:
+        filled[0].start = 0.0
+
+    # turn 사이 갭 처리
+    for i in range(len(filled) - 1):
+        curr = filled[i]
+        nxt = filled[i + 1]
+        if nxt.start > curr.end:
+            gap_mid = (curr.end + nxt.start) / 2
+            curr.end = gap_mid
+            nxt.start = gap_mid
+
+    # 끝 부분 갭: 마지막 turn 이후 남은 오디오
+    if audio_end > filled[-1].end:
+        filled[-1].end = audio_end
+
+    return filled
+
+
 def map_speakers(segments: list[ASRSegment], diar: list[DiarTurn]) -> list[TimelineTurn]:
     """Diarization 결과를 기준으로 ASR 텍스트를 화자별로 분배한다.
 
-    기존 방식: ASR 세그먼트별로 가장 겹침이 큰 화자 1명 배정
-    새 방식: diar turn별로 해당 시간 구간의 ASR 텍스트를 추출하여 배정
+    1. 연속 동일 화자 diar turn 병합
+    2. diar 갭을 앞뒤 화자에 할당 (텍스트 누락 방지)
+    3. 병합된 diar turn 기준으로 ASR 텍스트 분배
 
     diar가 없으면 ASR 세그먼트 기준 fallback.
     """
     settings = get_settings()
 
     if not diar:
-        # diarization이 없으면 기존 방식 fallback
         turns = [
             TimelineTurn(speaker="UNKNOWN", start=seg.start, end=seg.end, text=seg.text)
             for seg in segments
@@ -264,9 +320,21 @@ def map_speakers(segments: list[ASRSegment], diar: list[DiarTurn]) -> list[Timel
     if not segments:
         return []
 
-    # diar turn 기준으로 텍스트 분배
+    # 1) 연속 동일 화자 병합
+    merged_diar = _merge_same_speaker_diar(diar)
+
+    # 2) 갭 채우기 (오디오 끝 시간 = 마지막 ASR 세그먼트 끝)
+    audio_end = max(seg.end for seg in segments)
+    filled_diar = _fill_diar_gaps(merged_diar, audio_end)
+
+    logger.info(
+        "Diar preprocessing: %d raw → %d merged → %d gap-filled turns",
+        len(diar), len(merged_diar), len(filled_diar),
+    )
+
+    # 3) diar turn 기준으로 텍스트 분배
     turns: list[TimelineTurn] = []
-    for d in sorted(diar, key=lambda x: x.start):
+    for d in filled_diar:
         collected_words: list[str] = []
 
         for seg in segments:
@@ -278,7 +346,6 @@ def map_speakers(segments: list[ASRSegment], diar: list[DiarTurn]) -> list[Timel
             if not seg_words:
                 continue
 
-            # ASR 세그먼트에서 diar turn 시간에 해당하는 단어를 추출
             extracted = _distribute_words_by_time(
                 seg_words, seg.start, seg.end, d.start, d.end,
             )
@@ -293,7 +360,7 @@ def map_speakers(segments: list[ASRSegment], diar: list[DiarTurn]) -> list[Timel
                 text=text,
             ))
 
-    # merge 먼저 수행 후, 긴 turn을 분할 (분할 결과가 다시 병합되지 않도록)
+    # merge 먼저 수행 후, 긴 turn을 분할
     turns = merge_turns(turns)
     turns = _split_long_turns(turns, settings.max_turn_sec)
 
