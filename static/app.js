@@ -42,6 +42,12 @@ createApp({
       showFileTest: false,
       audioFile: null,
       fileBusy: false,
+      // Mute (일시 중지 — 오디오 전송 중단)
+      muted: false,
+      mutedTime: 0,
+      // Active sessions
+      activeSessions: null,
+      activeSessionTimer: null,
       // DEV: debug raw data
       showDebug: false,
       rawSttItems: [],
@@ -132,6 +138,7 @@ createApp({
         this.micStream = mic;
         this.setupCapture(mic, null);
         this.phase = "recording";
+        this.startActiveSessionPolling();
       } catch (e) {
         this.errorMsg = `녹음 시작 실패: ${e.message}`;
         this.cleanup();
@@ -159,6 +166,7 @@ createApp({
         this.micStream = mic;
         this.setupCapture(mic, sys);
         this.phase = "recording";
+        this.startActiveSessionPolling();
       } catch (e) {
         this.errorMsg = `녹음 시작 실패: ${e.message}`;
         this.cleanup();
@@ -200,6 +208,12 @@ createApp({
       };
       this.sendInterval = setInterval(() => {
         if (this.pcmLen >= chunkSamples) {
+          if (this.muted) {
+            // 음소거 중: 버퍼를 버린다 (타임라인에 빈 구간으로 남김)
+            this.pcmBuf = [];
+            this.pcmLen = 0;
+            return;
+          }
           const merged = this.mergeFloat32(this.pcmBuf, this.pcmLen);
           const chunk = merged.slice(0, chunkSamples);
           const remainder = merged.slice(chunkSamples);
@@ -212,6 +226,7 @@ createApp({
       this.recordingTime = 0;
       this.recordingTimer = setInterval(() => {
         this.recordingTime++;
+        if (this.muted) this.mutedTime++;
       }, 1000);
       if (ctx.state === "suspended") ctx.resume();
     },
@@ -250,10 +265,36 @@ createApp({
         }
       }
     },
+    // ── Mute (일시 중지) ──────────────────────────────────
+    toggleMute() {
+      this.muted = !this.muted;
+      if (this.muted) {
+        this.mutedTime = 0;
+      }
+    },
+    // ── Active session polling ──────────────────────────
+    startActiveSessionPolling() {
+      this.fetchActiveSessions();
+      this.activeSessionTimer = setInterval(() => this.fetchActiveSessions(), 10000);
+    },
+    stopActiveSessionPolling() {
+      if (this.activeSessionTimer) {
+        clearInterval(this.activeSessionTimer);
+        this.activeSessionTimer = null;
+      }
+    },
+    async fetchActiveSessions() {
+      try {
+        const r = await this.api("/api/sessions/active");
+        this.activeSessions = r.active_sessions;
+      } catch { /* ignore */ }
+    },
     // ── Stop & Finalize ───────────────────────────────────
     async stopAndFinalize() {
       clearInterval(this.recordingTimer);
       clearInterval(this.sendInterval);
+      this.stopActiveSessionPolling();
+      this.muted = false;
       this.phase = "processing";
       // Flush remaining audio
       if (this.pcmLen > 0) {
@@ -318,6 +359,7 @@ createApp({
     },
     cleanup() {
       this.stopStreams();
+      this.stopActiveSessionPolling();
       if (this.recordingTimer) clearInterval(this.recordingTimer);
       if (this.sendInterval) clearInterval(this.sendInterval);
       if (this.scriptProc) {
@@ -440,6 +482,9 @@ createApp({
       this.errorMsg = "";
       this.mode = "";
       this.recordingTime = 0;
+      this.muted = false;
+      this.mutedTime = 0;
+      this.activeSessions = null;
       this.showDebug = false;
       this.rawSttItems = [];
       this.rawDiarSegments = [];

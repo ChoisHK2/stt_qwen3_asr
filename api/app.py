@@ -179,6 +179,14 @@ async def api_finalize(session_id: str):
     return await app.state.session_service.finalize(session_id)
 
 
+@app.get("/api/sessions/active")
+async def api_active_sessions():
+    """현재 활성 세션 수를 반환한다 (로드 테스트용)."""
+    store: RedisStore = app.state.store
+    count = await store.count_active_sessions()
+    return {"active_sessions": count}
+
+
 @app.get("/api/session/{session_id}/audio")
 async def api_session_audio(session_id: str):
     st = await app.state.session_service.status(session_id)

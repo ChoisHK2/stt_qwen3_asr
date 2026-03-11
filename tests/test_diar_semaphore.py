@@ -1,6 +1,8 @@
 """Diarization semaphore limits concurrent diarization tasks."""
 
 import asyncio
+import threading
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -21,18 +23,22 @@ def _make_service(max_concurrent_diar: int = 2) -> SessionService:
     store = AsyncMock()
     store.get_session_meta = AsyncMock(return_value={"sample_rate": 16000})
     store.set_status = AsyncMock()
+    store.get_diar_epochs = AsyncMock(return_value=[])
+    store.get_pcm = AsyncMock(return_value=b"\x00" * 32000)  # 1 sec of audio
 
     with patch("core.session_service.get_settings") as mock_settings:
         settings = MagicMock()
         settings.max_concurrent_diar = max_concurrent_diar
+        settings.max_concurrent_asr = 32
         settings.pyannote_local_path = "/models/pyannote"
         settings.pyannote_token = None
         settings.pyannote_model = "pyannote/speaker-diarization-community-1"
         settings.diar_device = "cpu"
+        settings.diar_chunk_interval_sec = 600
+        settings.diar_embedding_threshold = 0.65
         mock_settings.return_value = settings
         svc = SessionService(store)
 
-    # Restore real settings for attribute access
     svc.settings = settings
     return svc
 
@@ -43,53 +49,40 @@ async def test_diar_semaphore_limits_concurrency():
     max_concurrent = 2
     svc = _make_service(max_concurrent_diar=max_concurrent)
 
-    peak_concurrent = 0
-    current_concurrent = 0
-    lock = asyncio.Lock()
+    counter_lock = threading.Lock()
+    counter = 0
+    peak = 0
 
     original_diarize_sync = svc._diarize_sync
 
     def slow_diarize_sync(source, token, wav_path):
-        nonlocal peak_concurrent, current_concurrent
-        # We can't use asyncio.Lock in sync code, use a simple counter
-        # This is approximate but sufficient for testing
-        import threading
-        nonlocal lock
-        current_concurrent_local = 0
-        # Use threading lock for thread-safe counter
-        if not hasattr(slow_diarize_sync, '_lock'):
-            slow_diarize_sync._lock = asyncio.Lock()
-            slow_diarize_sync._counter = 0
-            slow_diarize_sync._peak = 0
-            slow_diarize_sync._tlock = threading.Lock()
-
-        with slow_diarize_sync._tlock:
-            slow_diarize_sync._counter += 1
-            if slow_diarize_sync._counter > slow_diarize_sync._peak:
-                slow_diarize_sync._peak = slow_diarize_sync._counter
-
-        import time
-        time.sleep(0.1)  # Simulate work
-
-        with slow_diarize_sync._tlock:
-            slow_diarize_sync._counter -= 1
-
+        nonlocal counter, peak
+        with counter_lock:
+            counter += 1
+            if counter > peak:
+                peak = counter
+        time.sleep(0.1)
+        with counter_lock:
+            counter -= 1
         return []
 
     svc._diarize_sync = slow_diarize_sync
 
-    # Mock os.path.isdir to return True for pyannote path
+    # Use _run_diarization_remaining which uses the semaphore
+    # It falls back to full diarization when no epochs exist
     with patch("core.session_service.os.path.isdir", return_value=True):
         tasks = [
-            asyncio.create_task(svc._run_diarization_background(f"sess-{i}", f"/tmp/test-{i}.wav"))
+            asyncio.create_task(
+                svc._run_diarization_remaining(f"sess-{i}", b"\x00" * 32000, 16000)
+            )
             for i in range(5)
         ]
         await asyncio.gather(*tasks)
 
-    assert slow_diarize_sync._peak <= max_concurrent, (
-        f"Peak concurrency {slow_diarize_sync._peak} exceeded limit {max_concurrent}"
+    assert peak <= max_concurrent, (
+        f"Peak concurrency {peak} exceeded limit {max_concurrent}"
     )
-    # Verify all 5 tasks completed (set_status called with "done" for each)
+    # Verify all 5 tasks completed
     done_calls = [
         c for c in svc.store.set_status.call_args_list
         if c.args[1].get("diar_status") == "done"

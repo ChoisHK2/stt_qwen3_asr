@@ -11,7 +11,11 @@ import ulid
 
 from audio.preprocess import preprocess_chunk
 from clients.asr_client import ASRClient
-from clients.diarization_client import DiarizationClient
+from clients.diarization_client import (
+    DiarizationClient,
+    DiarEpochResult,
+    match_speakers_by_embedding,
+)
 from core.config import get_settings
 from core.matching import align_final_with_chunks, map_speakers
 from storage.redis_store import RedisStore
@@ -94,6 +98,24 @@ class SessionService:
             },
         )
 
+        # ── 인크리멘탈 diarization 트리거 체크 ──
+        interval = self.settings.diar_chunk_interval_sec
+        if interval > 0:
+            prev_duration = (pcm_before / 2) / sample_rate
+            # 이전 에폭 수 vs 현재 에폭 수 비교
+            prev_epoch_count = int(prev_duration // interval)
+            curr_epoch_count = int(new_duration // interval)
+            if curr_epoch_count > prev_epoch_count:
+                # 새 에폭 경계를 넘음 → 인크리멘탈 diar 트리거
+                epoch_idx = curr_epoch_count - 1
+                epoch_start_byte = epoch_idx * interval * sample_rate * 2
+                epoch_end_byte = (epoch_idx + 1) * interval * sample_rate * 2
+                asyncio.create_task(
+                    self._run_incremental_diar_epoch(
+                        ssid, epoch_idx, epoch_start_byte, epoch_end_byte, sample_rate,
+                    )
+                )
+
         # realtime=False: 오디오 저장만, STT 스킵
         if not realtime:
             return {
@@ -151,7 +173,153 @@ class SessionService:
             **st,
         }
 
-    # ── Stop: WAV 저장 + 백그라운드 diar & stt_final 시작 ──────────
+    # ── Incremental diarization (에폭 단위) ────────────────────────
+
+    async def _run_incremental_diar_epoch(
+        self, ssid: str, epoch_idx: int, start_byte: int, end_byte: int, sample_rate: int,
+    ) -> None:
+        """10분 에폭에 대해 diarization + 임베딩 추출을 수행한다."""
+        try:
+            # diarization 소스 확인
+            diarization_source = self._get_diar_source()
+            if not diarization_source:
+                return
+
+            assert self._diar_semaphore is not None
+            interval = self.settings.diar_chunk_interval_sec
+            offset_sec = epoch_idx * interval
+            logger.info("Incremental diar epoch %d queued for %s (offset=%.0fs)",
+                        epoch_idx, ssid[:8], offset_sec)
+
+            async with self._diar_semaphore:
+                logger.info("Incremental diar epoch %d started for %s", epoch_idx, ssid[:8])
+
+                # PCM 데이터에서 해당 에폭 구간 추출
+                pcm_data = await self.store.get_pcm(ssid)
+                epoch_pcm = pcm_data[start_byte:min(end_byte, len(pcm_data))]
+
+                if len(epoch_pcm) < sample_rate * 2:  # 최소 1초
+                    return
+
+                # diar 모델 로드 + 에폭 diarize
+                token = self._get_diar_token(diarization_source)
+                turns, embeddings = await asyncio.to_thread(
+                    self._diarize_epoch_sync,
+                    diarization_source, token, epoch_pcm, sample_rate, offset_sec,
+                )
+
+                # 이전 에폭들의 임베딩과 매칭하여 글로벌 화자 ID 결정
+                prev_epochs = await self.store.get_diar_epochs(ssid)
+                speaker_map = self._resolve_speaker_map(
+                    prev_epochs, turns, embeddings, epoch_idx,
+                )
+
+                # 글로벌 시간 + 글로벌 화자 ID로 변환
+                global_turns = []
+                for t in turns:
+                    global_speaker = speaker_map.get(t.speaker, t.speaker)
+                    global_turns.append({
+                        "speaker": global_speaker,
+                        "start": t.start + offset_sec,
+                        "end": t.end + offset_sec,
+                    })
+
+                # 글로벌 임베딩 (매핑 적용)
+                global_embeddings = {}
+                for local_spk, emb in embeddings.items():
+                    global_spk = speaker_map.get(local_spk, local_spk)
+                    global_embeddings[global_spk] = emb.tolist()
+
+                epoch_data = {
+                    "epoch_idx": epoch_idx,
+                    "offset_sec": offset_sec,
+                    "duration_sec": len(epoch_pcm) / 2 / sample_rate,
+                    "turns": global_turns,
+                    "speaker_embeddings": global_embeddings,
+                    "speaker_map": speaker_map,
+                }
+                await self.store.append_diar_epoch(ssid, epoch_data)
+
+                logger.info(
+                    "Incremental diar epoch %d done for %s: %d turns, %d speakers",
+                    epoch_idx, ssid[:8], len(global_turns), len(global_embeddings),
+                )
+
+        except Exception as e:
+            logger.warning("Incremental diar epoch %d error for %s: %s", epoch_idx, ssid[:8], e)
+
+    def _get_diar_source(self) -> str | None:
+        if os.path.isdir(self.settings.pyannote_local_path):
+            return self.settings.pyannote_local_path
+        if self.settings.pyannote_token:
+            return self.settings.pyannote_model
+        return None
+
+    def _get_diar_token(self, source: str) -> str | None:
+        return self.settings.pyannote_token if source == self.settings.pyannote_model else None
+
+    def _diarize_epoch_sync(
+        self, source: str, token: str | None, pcm_data: bytes, sample_rate: int, offset_sec: float,
+    ) -> tuple:
+        """동기 에폭 diarization (thread pool에서 실행)."""
+        self.diar.load(source, token, device=self.settings.diar_device)
+        turns, embeddings = self.diar.diarize_epoch(
+            pcm_data, sample_rate, offset_sec, device=self.settings.diar_device,
+        )
+        return turns, embeddings
+
+    def _resolve_speaker_map(
+        self,
+        prev_epochs: list[dict],
+        curr_turns: list,
+        curr_embeddings: dict,
+        epoch_idx: int,
+    ) -> dict[str, str]:
+        """이전 에폭의 임베딩과 비교하여 화자 매핑을 결정한다."""
+        # 이전 에폭들의 글로벌 임베딩 수집 (가장 최근 것 우선)
+        all_prev_embeddings: dict[str, np.ndarray] = {}
+        for ep in reversed(prev_epochs):
+            for spk, emb_list in ep.get("speaker_embeddings", {}).items():
+                if spk not in all_prev_embeddings:
+                    all_prev_embeddings[spk] = np.array(emb_list)
+
+        if not all_prev_embeddings or not curr_embeddings:
+            # 첫 에폭이거나 임베딩이 없으면 순차 할당
+            speaker_map: dict[str, str] = {}
+            existing_count = len(all_prev_embeddings)
+            counter = existing_count
+            for t in curr_turns:
+                if t.speaker not in speaker_map:
+                    speaker_map[t.speaker] = f"SPEAKER_{counter:02d}"
+                    counter += 1
+            return speaker_map
+
+        # 임베딩 기반 매칭
+        embedding_map = match_speakers_by_embedding(
+            all_prev_embeddings,
+            curr_embeddings,
+            threshold=self.settings.diar_embedding_threshold,
+        )
+
+        # 매칭되지 않은 화자에 새 글로벌 ID 할당
+        existing_globals = set(all_prev_embeddings.keys()) | set(embedding_map.values())
+        max_idx = 0
+        for g in existing_globals:
+            if g.startswith("SPEAKER_"):
+                try:
+                    max_idx = max(max_idx, int(g.split("_")[1]) + 1)
+                except (ValueError, IndexError):
+                    pass
+
+        speaker_map = dict(embedding_map)
+        for t in curr_turns:
+            if t.speaker not in speaker_map:
+                speaker_map[t.speaker] = f"SPEAKER_{max_idx:02d}"
+                max_idx += 1
+
+        return speaker_map
+
+    # ── Stop: WAV 저장 + 잔여분 diar & stt_final 시작 ──────────
 
     async def stop_session(self, ssid: str) -> dict[str, Any]:
         meta = await self.store.get_session_meta(ssid)
@@ -174,7 +342,7 @@ class SessionService:
 
         # Background tasks
         asyncio.create_task(self._run_stt_final_background(ssid, pcm_data, sample_rate))
-        asyncio.create_task(self._run_diarization_background(ssid, wav_path))
+        asyncio.create_task(self._run_diarization_remaining(ssid, pcm_data, sample_rate))
 
         return {
             "ssid": ssid,
@@ -238,16 +406,12 @@ class SessionService:
                 "stt_final_error": repr(e),
             })
 
-    # ── Background diarization ─────────────────────────────────────
+    # ── Background diarization: 잔여분만 처리 ────────────────────
 
-    async def _run_diarization_background(self, ssid: str, wav_path: str) -> None:
+    async def _run_diarization_remaining(self, ssid: str, pcm_data: bytes, sample_rate: int) -> None:
+        """stop 시 호출: 이미 처리된 에폭 이후의 잔여 오디오만 diarize한다."""
         try:
-            diarization_source = None
-            if os.path.isdir(self.settings.pyannote_local_path):
-                diarization_source = self.settings.pyannote_local_path
-            elif self.settings.pyannote_token:
-                diarization_source = self.settings.pyannote_model
-
+            diarization_source = self._get_diar_source()
             if not diarization_source:
                 await self.store.set_status(ssid, {
                     "diar_status": "error",
@@ -255,25 +419,99 @@ class SessionService:
                 })
                 return
 
-            token = self.settings.pyannote_token if diarization_source == self.settings.pyannote_model else None
-
             assert self._diar_semaphore is not None
             await self.store.set_status(ssid, {"diar_status": "queued"})
-            logger.info("Diarization queued for %s (semaphore: %d/%d available)",
-                        ssid[:8], self._diar_semaphore._value, self.settings.max_concurrent_diar)
 
             async with self._diar_semaphore:
                 await self.store.set_status(ssid, {"diar_status": "running"})
-                logger.info("Diarization started for %s", ssid[:8])
-                diar_result = await asyncio.to_thread(
-                    self._diarize_sync, diarization_source, token, wav_path,
-                )
 
-            await self.store.set_status(ssid, {
-                "diar_status": "done",
-                "diar_segments": diar_result,
-            })
-            logger.info("Diarization done for %s: %d segments", ssid[:8], len(diar_result))
+                # 이미 처리된 에폭 확인
+                prev_epochs = await self.store.get_diar_epochs(ssid)
+                interval = self.settings.diar_chunk_interval_sec
+                total_duration = len(pcm_data) / 2 / sample_rate
+
+                if interval > 0 and prev_epochs:
+                    # 마지막 에폭 이후의 잔여분만 처리
+                    completed_epochs = len(prev_epochs)
+                    remaining_start_sec = completed_epochs * interval
+                    remaining_start_byte = int(remaining_start_sec * sample_rate * 2)
+
+                    if remaining_start_byte < len(pcm_data):
+                        remaining_pcm = pcm_data[remaining_start_byte:]
+                        remaining_duration = len(remaining_pcm) / 2 / sample_rate
+
+                        logger.info(
+                            "Diar remaining for %s: %.1fs (epochs done: %d, remaining: %.1fs)",
+                            ssid[:8], total_duration, completed_epochs, remaining_duration,
+                        )
+
+                        token = self._get_diar_token(diarization_source)
+                        turns, embeddings = await asyncio.to_thread(
+                            self._diarize_epoch_sync,
+                            diarization_source, token, remaining_pcm,
+                            sample_rate, remaining_start_sec,
+                        )
+
+                        # 화자 매핑
+                        speaker_map = self._resolve_speaker_map(
+                            prev_epochs, turns, embeddings, completed_epochs,
+                        )
+
+                        # 잔여분 에폭 저장
+                        global_turns = []
+                        for t in turns:
+                            global_spk = speaker_map.get(t.speaker, t.speaker)
+                            global_turns.append({
+                                "speaker": global_spk,
+                                "start": t.start + remaining_start_sec,
+                                "end": t.end + remaining_start_sec,
+                            })
+
+                        global_embeddings = {}
+                        for local_spk, emb in embeddings.items():
+                            global_spk = speaker_map.get(local_spk, local_spk)
+                            global_embeddings[global_spk] = emb.tolist()
+
+                        epoch_data = {
+                            "epoch_idx": completed_epochs,
+                            "offset_sec": remaining_start_sec,
+                            "duration_sec": remaining_duration,
+                            "turns": global_turns,
+                            "speaker_embeddings": global_embeddings,
+                            "speaker_map": speaker_map,
+                        }
+                        await self.store.append_diar_epoch(ssid, epoch_data)
+                    else:
+                        logger.info("Diar remaining for %s: no remaining audio", ssid[:8])
+
+                    # 모든 에폭의 turns를 합쳐서 최종 결과 생성
+                    all_epochs = await self.store.get_diar_epochs(ssid)
+                    all_segments = []
+                    for ep in all_epochs:
+                        all_segments.extend(ep.get("turns", []))
+
+                    await self.store.set_status(ssid, {
+                        "diar_status": "done",
+                        "diar_segments": all_segments,
+                    })
+                    logger.info(
+                        "Diarization done for %s: %d total segments from %d epochs",
+                        ssid[:8], len(all_segments), len(all_epochs),
+                    )
+                else:
+                    # 인크리멘탈 에폭이 없음 → 전체 fallback
+                    logger.info("No incremental epochs for %s, full diarization fallback", ssid[:8])
+                    wav_path = f"data/audio/{ssid}.wav"
+                    token = self._get_diar_token(diarization_source)
+                    diar_result = await asyncio.to_thread(
+                        self._diarize_sync, diarization_source, token, wav_path,
+                    )
+                    await self.store.set_status(ssid, {
+                        "diar_status": "done",
+                        "diar_segments": diar_result,
+                    })
+                    logger.info("Diarization done for %s: %d segments (full)", ssid[:8], len(diar_result))
+
         except Exception as e:
             logger.warning("Diarization error for %s: %s", ssid[:8], e)
             await self.store.set_status(ssid, {
@@ -358,15 +596,11 @@ class SessionService:
                     wav_path = f"data/audio/{ssid}.wav"
                     self._write_wav(wav_path, pcm_data, sample_rate)
 
-            diarization_source = None
-            if os.path.isdir(self.settings.pyannote_local_path):
-                diarization_source = self.settings.pyannote_local_path
-            elif self.settings.pyannote_token:
-                diarization_source = self.settings.pyannote_model
+            diarization_source = self._get_diar_source()
 
             if diarization_source and wav_path:
                 try:
-                    token = self.settings.pyannote_token if diarization_source == self.settings.pyannote_model else None
+                    token = self._get_diar_token(diarization_source)
                     self.diar.load(diarization_source, token, device=self.settings.diar_device)
                     diar_segments = [d.__dict__ for d in self.diar.diarize(wav_path)]
                     diar_status = f"ok: {diarization_source}"

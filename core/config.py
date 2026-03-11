@@ -32,6 +32,8 @@ class Settings:
     min_turn_sec: float = 0.4
     max_turn_sec: float = 15.0
     min_words_per_turn: int = 1
+    diar_chunk_interval_sec: int = 600  # 인크리멘탈 diar 주기(초, 기본 10분)
+    diar_embedding_threshold: float = 0.65  # 화자 임베딩 cosine similarity 임계값
     stt_final_chunk_sec: int = 60  # stop 후 재처리 세그먼트 크기(초)
     max_session_audio_sec: int = 7200  # 세션당 최대 오디오 길이(초)
     finalize_async_threshold_sec: float = 480
@@ -74,6 +76,8 @@ def get_settings() -> Settings:
         min_turn_sec=float(os.getenv("MIN_TURN_SEC", "0.4")),
         max_turn_sec=float(os.getenv("MAX_TURN_SEC", "15")),
         min_words_per_turn=int(os.getenv("MIN_WORDS_PER_TURN", "1")),
+        diar_chunk_interval_sec=int(os.getenv("DIAR_CHUNK_INTERVAL_SEC", "600")),
+        diar_embedding_threshold=float(os.getenv("DIAR_EMBEDDING_THRESHOLD", "0.65")),
         stt_final_chunk_sec=int(os.getenv("STT_FINAL_CHUNK_SEC", "60")),
         max_session_audio_sec=int(os.getenv("MAX_SESSION_AUDIO_SEC", "7200")),
         finalize_async_threshold_sec=float(os.getenv("FINALIZE_ASYNC_THRESHOLD_SEC", "480")),
