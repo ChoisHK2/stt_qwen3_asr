@@ -12,6 +12,7 @@ class Settings:
     partial_mode: str = "on"
     overload_http_code: int = 429
     max_concurrent_asr: int = 32
+    max_concurrent_diar: int = 2
     preprocess_enabled: bool = True
     noise_reduction_mode: str = "FAST"
     enable_vad: bool = False
@@ -53,6 +54,7 @@ def get_settings() -> Settings:
         partial_mode=os.getenv("PARTIAL_MODE", "on"),
         overload_http_code=int(os.getenv("OVERLOAD_HTTP_CODE", "429")),
         max_concurrent_asr=int(os.getenv("MAX_CONCURRENT_ASR", "32")),
+        max_concurrent_diar=int(os.getenv("MAX_CONCURRENT_DIAR", "2")),
         preprocess_enabled=_env_bool("PREPROCESS_ENABLED", True),
         noise_reduction_mode=os.getenv("NOISE_REDUCTION_MODE", "FAST"),
         enable_vad=_env_bool("ENABLE_VAD", False),
