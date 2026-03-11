@@ -310,6 +310,21 @@
       border: none; background: none; cursor: pointer;
       font-size: 16px; color: #991B1B; padding: 4px;
     }
+    /* ── Recovery banner ─────────────────────── */
+    .recovery-banner {
+      background: var(--surface); border: 1px solid var(--accent-soft);
+      border-radius: 12px; padding: 20px 24px;
+      max-width: 480px; width: 100%; margin-bottom: 24px;
+    }
+    .recovery-title {
+      font-size: 14px; font-weight: 700; color: var(--accent);
+      margin-bottom: 8px;
+    }
+    .recovery-info {
+      font-size: 12px; color: var(--text2); margin-bottom: 14px; line-height: 1.6;
+    }
+    .recovery-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .recovery-actions button:disabled { opacity: 0.5; cursor: wait; }
   </style>
 </head>
 <body>
@@ -327,6 +342,20 @@
     </header>
     <!-- IDLE -->
     <main v-if="phase==='idle'" class="main-center">
+      <!-- Session recovery banner -->
+      <div v-if="recoverySession" class="recovery-banner">
+        <div class="recovery-title">이전 세션이 남아 있습니다</div>
+        <div class="recovery-info">
+          세션 {{ recoverySession.ssid.slice(0, 8) }}...
+          &middot; {{ Math.floor(recoverySession.audio_duration_sec / 60) }}분 {{ Math.floor(recoverySession.audio_duration_sec % 60) }}초 녹음됨
+          &middot; {{ recoverySession.chunk_count }}개 청크
+        </div>
+        <div class="recovery-actions">
+          <button class="btn-primary" @click="resumeRecording" :disabled="recoveryBusy">이어서 녹음</button>
+          <button class="btn-secondary" @click="getPartialResults" :disabled="recoveryBusy">지금까지 결과 받기</button>
+          <button class="btn-small" @click="dismissRecovery" :disabled="recoveryBusy" style="border-color:var(--border);background:var(--surface);color:var(--text3);">무시</button>
+        </div>
+      </div>
       <div class="btn-pair">
         <button class="big-btn" @click="startOffline">
           <div class="big-btn-icon">

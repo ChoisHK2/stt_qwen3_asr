@@ -8,7 +8,7 @@ class Settings:
     app_host: str = "0.0.0.0"
     app_port: int = 8000
     redis_url: str = "redis://localhost:6379/0"
-    session_ttl_sec: int = 10800
+    session_ttl_sec: int = 14400
     partial_mode: str = "on"
     overload_http_code: int = 429
     max_concurrent_asr: int = 32
@@ -52,7 +52,7 @@ def get_settings() -> Settings:
         app_host=os.getenv("APP_HOST", "0.0.0.0"),
         app_port=int(os.getenv("APP_PORT", "8000")),
         redis_url=os.getenv("REDIS_URL", "redis://localhost:6379/0"),
-        session_ttl_sec=int(os.getenv("SESSION_TTL_SEC", "10800")),
+        session_ttl_sec=int(os.getenv("SESSION_TTL_SEC", "14400")),
         partial_mode=os.getenv("PARTIAL_MODE", "on"),
         overload_http_code=int(os.getenv("OVERLOAD_HTTP_CODE", "429")),
         max_concurrent_asr=int(os.getenv("MAX_CONCURRENT_ASR", "32")),

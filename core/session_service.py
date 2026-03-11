@@ -53,6 +53,98 @@ class SessionService:
         )
         return ssid
 
+    async def resume_session(self, ssid: str) -> dict[str, Any]:
+        """중단된 세션을 재개한다.
+
+        세션이 존재하고 TTL 내에 있으면 is_stopped를 해제하여 다시 청크를 받을 수 있게 한다.
+        세션이 없으면 에러를 반환한다.
+        """
+        meta = await self.store.get_session_meta(ssid)
+        if not meta:
+            return {"error": "SESSION_NOT_FOUND", "ssid": ssid}
+
+        # PCM 데이터로 현재까지의 오디오 길이 계산
+        pcm_data = await self.store.get_pcm(ssid)
+        sample_rate = int(meta.get("sample_rate", 16000))
+        audio_duration_sec = round(len(pcm_data) / 2 / sample_rate, 2) if pcm_data else 0.0
+
+        # is_stopped 해제하여 청크 수신 재개
+        meta["is_stopped"] = False
+        await self.store.create_or_touch_session(ssid, meta)
+
+        # 현재까지의 partial 수
+        partials = await self.store.get_partials(ssid)
+
+        return {
+            "ssid": ssid,
+            "status": "resumed",
+            "audio_duration_sec": audio_duration_sec,
+            "chunk_count": int(meta.get("chunk_count", 0)),
+            "partial_count": len(partials),
+            "last_accepted_seq": int(meta.get("last_accepted_seq", -1)),
+        }
+
+    async def get_partial_results(self, ssid: str) -> dict[str, Any]:
+        """세션의 지금까지 누적된 partial 결과를 반환한다 (finalize 없이).
+
+        연결이 끊겼을 때 지금까지 인식된 텍스트만이라도 받는 fallback용.
+        """
+        meta = await self.store.get_session_meta(ssid)
+        if not meta:
+            return {"error": "SESSION_NOT_FOUND", "ssid": ssid}
+
+        sample_rate = int(meta.get("sample_rate", 16000))
+        partials = await self.store.get_partials(ssid)
+        pcm_data = await self.store.get_pcm(ssid)
+        audio_duration_sec = round(len(pcm_data) / 2 / sample_rate, 2) if pcm_data else 0.0
+
+        # stt_final이 이미 있으면 그것도 포함
+        stt_final_items = await self.store.get_stt_final(ssid)
+
+        # partial 텍스트 조합
+        partial_texts = []
+        for p in sorted(partials, key=lambda x: x.get("start_ms", 0)):
+            text = (p.get("text") or "").strip()
+            if text:
+                partial_texts.append({
+                    "start_ms": p.get("start_ms", 0),
+                    "end_ms": p.get("end_ms", 0),
+                    "text": text,
+                })
+
+        full_text = " ".join(t["text"] for t in partial_texts).strip()
+
+        # stt_final이 있으면 더 높은 품질의 텍스트 사용
+        if stt_final_items:
+            full_text = " ".join(
+                (item.get("text") or "").strip()
+                for item in sorted(stt_final_items, key=lambda x: x.get("start_ms", 0))
+                if (item.get("text") or "").strip()
+            ).strip()
+
+        # diar epochs도 포함
+        diar_epochs = await self.store.get_diar_epochs(ssid)
+        diar_segments = []
+        for ep in diar_epochs:
+            diar_segments.extend(ep.get("turns", []))
+
+        st = await self.store.get_status(ssid)
+
+        return {
+            "ssid": ssid,
+            "status": "partial",
+            "is_stopped": meta.get("is_stopped", False),
+            "audio_duration_sec": audio_duration_sec,
+            "chunk_count": int(meta.get("chunk_count", 0)),
+            "partial_count": len(partial_texts),
+            "full_text": full_text,
+            "partial_items": partial_texts,
+            "stt_final_items": stt_final_items,
+            "diar_segments": diar_segments,
+            "diar_status": st.get("diar_status", "idle"),
+            "stt_final_status": st.get("stt_final_status", "idle"),
+        }
+
     async def ingest_chunk(
         self, ssid: str, seq: int, raw: bytes, t0: float | None = None, realtime: bool = True,
     ) -> dict[str, Any]:

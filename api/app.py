@@ -179,6 +179,24 @@ async def api_finalize(session_id: str):
     return await app.state.session_service.finalize(session_id)
 
 
+@app.post("/api/session/{session_id}/resume")
+async def api_resume_session(session_id: str):
+    """중단된 세션을 재개하여 녹음을 이어간다."""
+    result = await app.state.session_service.resume_session(session_id)
+    if result.get("error"):
+        raise HTTPException(404, result["error"])
+    return result
+
+
+@app.get("/api/session/{session_id}/partial-results")
+async def api_partial_results(session_id: str):
+    """세션의 지금까지 누적된 결과를 반환한다 (finalize 없이)."""
+    result = await app.state.session_service.get_partial_results(session_id)
+    if result.get("error"):
+        raise HTTPException(404, result["error"])
+    return result
+
+
 @app.get("/api/sessions/active")
 async def api_active_sessions():
     """현재 활성 세션 수를 반환한다 (로드 테스트용)."""
