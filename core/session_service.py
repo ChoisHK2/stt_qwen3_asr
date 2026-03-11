@@ -13,7 +13,7 @@ from audio.preprocess import preprocess_chunk
 from clients.asr_client import ASRClient
 from clients.diarization_client import DiarizationClient
 from core.config import get_settings
-from core.matching import map_speakers
+from core.matching import align_final_with_chunks, map_speakers
 from storage.redis_store import RedisStore
 
 logger = logging.getLogger("qwen3-asr.session")
@@ -281,37 +281,52 @@ class SessionService:
         stt_final_items = await self.store.get_stt_final(ssid)
         partials = await self.store.get_partials(ssid)
 
-        if stt_final_items:
-            effective_items = stt_final_items
-            stt_source = "final"
-        else:
-            # Fallback: build items from partials
-            effective_items = []
-            for p in partials:
-                if p.get("text"):
-                    effective_items.append({
-                        "start_ms": p.get("start_ms", 0),
-                        "end_ms": p.get("end_ms", 0),
-                        "text": p["text"],
-                    })
-            stt_source = "chunk"
-
-        full_text = " ".join(
-            (item.get("text") or "").strip()
-            for item in sorted(effective_items, key=lambda x: (x.get("start_ms", 0), x.get("end_ms", 0)))
-            if (item.get("text") or "").strip()
-        ).strip()
-
-        # Build ASR segments from effective items
         from core.models import ASRSegment, DiarTurn
 
-        asr_segments = []
-        for item in effective_items:
-            start_sec = item.get("start_ms", 0) / 1000.0
-            end_sec = item.get("end_ms", 0) / 1000.0
-            text = (item.get("text") or "").strip()
+        # chunk partials → ASRSegment (시간 경계용)
+        chunk_segments: list[ASRSegment] = []
+        for p in partials:
+            text = (p.get("text") or "").strip()
             if text:
-                asr_segments.append(ASRSegment(start=start_sec, end=end_sec, text=text))
+                chunk_segments.append(ASRSegment(
+                    start=p.get("start_ms", 0) / 1000.0,
+                    end=p.get("end_ms", 0) / 1000.0,
+                    text=text,
+                ))
+
+        if stt_final_items:
+            # stt_final → ASRSegment (텍스트 품질용)
+            final_segments: list[ASRSegment] = []
+            for item in stt_final_items:
+                text = (item.get("text") or "").strip()
+                if text:
+                    final_segments.append(ASRSegment(
+                        start=item.get("start_ms", 0) / 1000.0,
+                        end=item.get("end_ms", 0) / 1000.0,
+                        text=text,
+                    ))
+
+            # final 텍스트를 chunk 시간 경계에 맞춰 재분할
+            if chunk_segments:
+                asr_segments = align_final_with_chunks(final_segments, chunk_segments)
+                stt_source = "final+chunk_aligned"
+            else:
+                asr_segments = final_segments
+                stt_source = "final"
+        else:
+            asr_segments = chunk_segments
+            stt_source = "chunk"
+
+        # full_text는 항상 stt_final 기준 (있으면)
+        text_source = stt_final_items if stt_final_items else [
+            {"start_ms": p.get("start_ms", 0), "end_ms": p.get("end_ms", 0), "text": p.get("text", "")}
+            for p in partials if p.get("text")
+        ]
+        full_text = " ".join(
+            (item.get("text") or "").strip()
+            for item in sorted(text_source, key=lambda x: (x.get("start_ms", 0), x.get("end_ms", 0)))
+            if (item.get("text") or "").strip()
+        ).strip()
 
         # Diarization
         diar_segments = st.get("diar_segments", [])

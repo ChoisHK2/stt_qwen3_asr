@@ -18,6 +18,30 @@ logger = logging.getLogger("qwen3-asr.asr_client")
 # Qwen3-ASR 모델 출력에서 언어와 텍스트를 추출하는 정규식
 _LANG_RE = re.compile(r"<\|([^|]+)\|>")
 _TEXT_RE = re.compile(r"<\|transcription\|>(.*?)(?:<\|/?|$)", re.DOTALL)
+# "language Korean", "Language: English" 등 모델이 삽입하는 잔여 언어 태그
+_LANG_TEXT_RE = re.compile(
+    r"(?i)\blanguage\s*:?\s*"
+    r"(?:Korean|English|Chinese|Japanese|French|German|Spanish|"
+    r"Portuguese|Russian|Arabic|Hindi|Turkish|Vietnamese|Thai|"
+    r"Indonesian|Malay|Italian|Dutch|Polish|Czech|Swedish|"
+    r"Norwegian|Danish|Finnish|Hungarian|Romanian|Bulgarian|"
+    r"Croatian|Slovak|Slovenian|Estonian|Latvian|Lithuanian|"
+    r"Ukrainian|Greek|Hebrew|Persian|Urdu|Bengali|Tamil|Telugu|"
+    r"Kannada|Malayalam|Gujarati|Marathi|Punjabi|Burmese|Khmer|"
+    r"Lao|Mongolian|Tibetan|Georgian|Armenian|Azerbaijani|Kazakh|"
+    r"Uzbek|Tagalog|Swahili|Afrikaans|Catalan|Galician|Basque|"
+    r"Welsh|Irish|Icelandic|Maltese|Albanian|Macedonian|Serbian|"
+    r"Bosnian|Montenegrin|Nepali|Sinhala|auto)\b\s*",
+)
+
+
+def _clean_asr_text(text: str) -> str:
+    """모델이 삽입하는 잔여 언어 표시 및 특수 태그를 제거한다."""
+    # <|...|> 형태의 잔여 태그 제거
+    text = re.sub(r"<\|[^|]*\|>", "", text)
+    # "language Korean" 등 제거
+    text = _LANG_TEXT_RE.sub("", text)
+    return text.strip()
 
 
 def parse_asr_output(content: str) -> tuple[str | None, str]:
@@ -39,7 +63,7 @@ def parse_asr_output(content: str) -> tuple[str | None, str]:
     lang_m = _LANG_RE.search(content)
     lang = lang_m.group(1) if lang_m else None
 
-    return lang, text
+    return lang, _clean_asr_text(text)
 
 
 class ASRClient:
