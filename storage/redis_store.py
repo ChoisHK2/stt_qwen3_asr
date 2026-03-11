@@ -101,6 +101,15 @@ class RedisStore:
         rows = await self.redis.lrange(self._diar_epochs_key(ssid), 0, -1)
         return [json.loads(r) for r in rows]
 
+    # ── Active session counting ─────────────────────────────────────
+
+    async def count_active_sessions(self) -> int:
+        """현재 Redis에 남아 있는 활성 세션 수를 반환한다."""
+        count = 0
+        async for _ in self.redis.scan_iter(match="session:*:meta", count=100):
+            count += 1
+        return count
+
     # ── Full PCM storage (for final re-processing) ─────────────────
 
     def _pcm_key(self, ssid: str) -> str:
