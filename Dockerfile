@@ -3,8 +3,8 @@
 # Redis + vLLM(qwen-asr-serve) + FastAPI를 하나의 컨테이너에서 실행
 #
 # 빌드:  docker build -t qwen3-stt .
-# HTTP:  docker run --gpus all --env-file .env -v ./models:/models -p 8000:8000 qwen3-stt
-# HTTPS: docker run --gpus all --env-file .env -v ./models:/models -v ./cert:/cert \
+# HTTP:  docker run --gpus all --env-file .env -v ./models:/models -v ./data:/app/data -p 8000:8000 qwen3-stt
+# HTTPS: docker run --gpus all --env-file .env -v ./models:/models -v ./data:/app/data -v ./cert:/cert \
 #          -e SSL_KEYFILE=/cert/key.pem -e SSL_CERTFILE=/cert/cert.pem -p 8000:8000 qwen3-stt
 # ============================================================
 FROM qwenllm/qwen3-asr:latest
@@ -40,6 +40,7 @@ RUN dos2unix /app/entrypoint.sh && chmod +x /app/entrypoint.sh \
  && find /app -type f -name "*.sh" -print0 | xargs -0 -r dos2unix
 
 RUN mkdir -p /app/data/audio
+VOLUME ["/app/data"]
 
 # ── 환경변수 기본값 ──────────────────────────────────────────
 ENV HF_HUB_OFFLINE=1
