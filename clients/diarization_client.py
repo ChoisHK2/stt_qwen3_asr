@@ -91,16 +91,66 @@ def get_embedding_inference(device: str = "cpu"):
         return None
 
 
-def _diarize_waveform(waveform, sample_rate: int) -> list[DiarTurn]:
-    """단일 waveform tensor를 diarize한다."""
+def _diarize_waveform(
+    waveform, sample_rate: int, return_embeddings: bool = False,
+) -> list[DiarTurn] | tuple[list[DiarTurn], dict[str, np.ndarray]]:
+    """단일 waveform tensor를 diarize한다.
+
+    return_embeddings=True이면 (turns, {speaker: centroid_embedding}) 튜플을 반환한다.
+    pyannote 3.0+의 return_embeddings 파라미터를 활용하여
+    파이프라인 한 번 실행으로 centroid 임베딩까지 추출한다.
+    """
     pipeline = _pipeline
     if not pipeline:
         raise RuntimeError("Diarization pipeline not loaded. Call load() first.")
 
-    result = pipeline({"waveform": waveform, "sample_rate": sample_rate})
+    audio_input = {"waveform": waveform, "sample_rate": sample_rate}
+
+    if return_embeddings:
+        try:
+            result = pipeline(audio_input, return_embeddings=True)
+            # return_embeddings=True → (Annotation, np.ndarray) 튜플
+            if isinstance(result, tuple) and len(result) == 2:
+                annotation, centroids = result
+                annotation = getattr(annotation, "speaker_diarization", annotation)
+                labels = list(annotation.labels())
+
+                turns: list[DiarTurn] = []
+                for seg, _, speaker in annotation.itertracks(yield_label=True):
+                    turns.append(DiarTurn(speaker=str(speaker), start=float(seg.start), end=float(seg.end)))
+
+                embeddings: dict[str, np.ndarray] = {}
+                if centroids is not None and len(centroids) > 0:
+                    for i, label in enumerate(labels):
+                        if i < len(centroids):
+                            embeddings[str(label)] = centroids[i].flatten()
+
+                logger.info("Diarized with embeddings: %d turns, %d speaker centroids",
+                           len(turns), len(embeddings))
+                return turns, embeddings
+            else:
+                # 구버전 pyannote — return_embeddings 미지원 fallback
+                logger.info("return_embeddings not supported, falling back to separate extraction")
+                annotation = getattr(result, "speaker_diarization", result)
+        except TypeError:
+            # return_embeddings 파라미터를 지원하지 않는 구버전
+            logger.info("return_embeddings parameter not supported, using fallback")
+            result = pipeline(audio_input)
+            annotation = getattr(result, "speaker_diarization", result)
+
+        turns = []
+        for seg, _, speaker in annotation.itertracks(yield_label=True):
+            turns.append(DiarTurn(speaker=str(speaker), start=float(seg.start), end=float(seg.end)))
+
+        # fallback: 별도 임베딩 추출
+        embeddings = extract_speaker_embeddings(waveform, sample_rate, turns)
+        return turns, embeddings
+
+    # return_embeddings=False: 기존 동작
+    result = pipeline(audio_input)
     annotation = getattr(result, "speaker_diarization", result)
 
-    turns: list[DiarTurn] = []
+    turns = []
     for seg, _, speaker in annotation.itertracks(yield_label=True):
         turns.append(DiarTurn(speaker=str(speaker), start=float(seg.start), end=float(seg.end)))
     return turns
@@ -347,7 +397,6 @@ class DiarizationClient:
         if self._loaded:
             return
         get_pipeline(model_path, token, device)
-        get_embedding_inference(device)
         self._loaded = True
 
     def diarize(self, wav_path: str) -> list[DiarTurn]:
@@ -404,6 +453,10 @@ class DiarizationClient:
     ) -> tuple[list[DiarTurn], dict[str, np.ndarray]]:
         """단일 에폭(10분 청크)을 diarize하고 화자 임베딩도 추출한다.
 
+        pyannote 3.0+: return_embeddings=True로 파이프라인 한 번 실행으로
+        diarization + centroid 임베딩을 함께 추출한다.
+        구버전: 별도 임베딩 추출로 fallback.
+
         Args:
             pcm_data: int16 PCM 바이트
             sample_rate: 샘플레이트
@@ -425,9 +478,13 @@ class DiarizationClient:
 
         logger.info("Diarize epoch: offset=%.1fs, duration=%.1fs", offset_sec, duration_sec)
         waveform = torch.from_numpy(audio).unsqueeze(0)
-        turns = _diarize_waveform(waveform, sample_rate)
 
-        # 화자 임베딩 추출
-        embeddings = extract_speaker_embeddings(waveform, sample_rate, turns, device)
+        # return_embeddings=True → 파이프라인에서 centroid 임베딩 직접 반환
+        result = _diarize_waveform(waveform, sample_rate, return_embeddings=True)
+        if isinstance(result, tuple):
+            turns, embeddings = result
+        else:
+            turns = result
+            embeddings = {}
 
         return turns, embeddings
