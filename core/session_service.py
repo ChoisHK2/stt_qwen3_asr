@@ -20,11 +20,16 @@ logger = logging.getLogger("qwen3-asr.session")
 
 
 class SessionService:
+    _diar_semaphore: asyncio.Semaphore | None = None
+
     def __init__(self, store: RedisStore):
         self.store = store
         self.settings = get_settings()
         self.asr = ASRClient()
         self.diar = DiarizationClient()
+        # Lazy-init class-level semaphore (must be created inside running loop)
+        if SessionService._diar_semaphore is None:
+            SessionService._diar_semaphore = asyncio.Semaphore(self.settings.max_concurrent_diar)
 
     async def close(self):
         await self.asr.close()
@@ -251,9 +256,19 @@ class SessionService:
                 return
 
             token = self.settings.pyannote_token if diarization_source == self.settings.pyannote_model else None
-            diar_result = await asyncio.to_thread(
-                self._diarize_sync, diarization_source, token, wav_path,
-            )
+
+            assert self._diar_semaphore is not None
+            await self.store.set_status(ssid, {"diar_status": "queued"})
+            logger.info("Diarization queued for %s (semaphore: %d/%d available)",
+                        ssid[:8], self._diar_semaphore._value, self.settings.max_concurrent_diar)
+
+            async with self._diar_semaphore:
+                await self.store.set_status(ssid, {"diar_status": "running"})
+                logger.info("Diarization started for %s", ssid[:8])
+                diar_result = await asyncio.to_thread(
+                    self._diarize_sync, diarization_source, token, wav_path,
+                )
+
             await self.store.set_status(ssid, {
                 "diar_status": "done",
                 "diar_segments": diar_result,
