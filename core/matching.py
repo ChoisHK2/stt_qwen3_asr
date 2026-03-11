@@ -360,9 +360,10 @@ def map_speakers(segments: list[ASRSegment], diar: list[DiarTurn]) -> list[Timel
                 text=text,
             ))
 
-    # merge 먼저 수행 후, 긴 turn을 분할
+    # merge → split → 재merge (split 후 동일 화자 연속 방지)
     turns = merge_turns(turns)
     turns = _split_long_turns(turns, settings.max_turn_sec)
+    turns = _final_merge_same_speaker(turns)
 
     return turns
 
@@ -406,6 +407,35 @@ def _split_long_turns(turns: list[TimelineTurn], max_sec: float) -> list[Timelin
                 ))
 
     return result
+
+
+def _final_merge_same_speaker(turns: list[TimelineTurn]) -> list[TimelineTurn]:
+    """최종 출력에서 연속 동일 화자 turn을 무조건 병합한다.
+
+    _split_long_turns 이후나, diar에서 동일 화자가 연속으로 나오는 경우
+    gap에 관계없이 동일 화자 연속 turn을 하나로 합쳐 표시한다.
+    """
+    if not turns:
+        return []
+    merged: list[TimelineTurn] = [TimelineTurn(
+        speaker=turns[0].speaker,
+        start=turns[0].start,
+        end=turns[0].end,
+        text=turns[0].text,
+    )]
+    for turn in turns[1:]:
+        prev = merged[-1]
+        if turn.speaker == prev.speaker:
+            prev.end = turn.end
+            prev.text = f"{prev.text} {turn.text}".strip()
+        else:
+            merged.append(TimelineTurn(
+                speaker=turn.speaker,
+                start=turn.start,
+                end=turn.end,
+                text=turn.text,
+            ))
+    return merged
 
 
 def merge_turns(turns: list[TimelineTurn]) -> list[TimelineTurn]:

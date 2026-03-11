@@ -3,7 +3,8 @@ from __future__ import annotations
 import logging
 import os
 import wave
-from collections import Counter, defaultdict
+from collections import defaultdict
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -11,10 +12,11 @@ from core.models import DiarTurn
 
 logger = logging.getLogger("qwen3-asr.diarization")
 
-# 싱글턴 파이프라인 (기존 diar.py 패턴: 한 번 로드 후 재사용)
+# 싱글턴 파이프라인 / 임베딩 모델
 _pipeline = None
+_embedding_inference = None
 
-# 20분 단위 청킹 (오버랩 2분)
+# 20분 단위 청킹 (오버랩 2분) — 단일 diarize() 호출 시 사용
 DIAR_CHUNK_SEC = 20 * 60
 DIAR_OVERLAP_SEC = 2 * 60
 
@@ -60,6 +62,35 @@ def get_pipeline(model_path: str, token: str | None = None, device: str = "cpu")
     return _pipeline
 
 
+def get_embedding_inference(device: str = "cpu"):
+    """pyannote 임베딩 모델을 싱글턴으로 로드한다.
+
+    diarization 파이프라인 내부의 임베딩 모델을 재사용한다.
+    파이프라인이 없으면 None을 반환한다.
+    """
+    global _embedding_inference
+    if _embedding_inference is not None:
+        return _embedding_inference
+
+    if _pipeline is None:
+        logger.warning("Cannot load embedding inference: pipeline not loaded yet")
+        return None
+
+    try:
+        from pyannote.audio import Inference
+        import torch
+
+        # 파이프라인 내부의 임베딩 모델 재사용
+        embedding_model = _pipeline.embedding
+        _embedding_inference = Inference(embedding_model, window="whole")
+        _embedding_inference.to(torch.device(device))
+        logger.info("Embedding inference loaded from pipeline's internal model")
+        return _embedding_inference
+    except Exception as e:
+        logger.warning("Failed to load embedding inference: %s", e)
+        return None
+
+
 def _diarize_waveform(waveform, sample_rate: int) -> list[DiarTurn]:
     """단일 waveform tensor를 diarize한다."""
     pipeline = _pipeline
@@ -73,6 +104,117 @@ def _diarize_waveform(waveform, sample_rate: int) -> list[DiarTurn]:
     for seg, _, speaker in annotation.itertracks(yield_label=True):
         turns.append(DiarTurn(speaker=str(speaker), start=float(seg.start), end=float(seg.end)))
     return turns
+
+
+@dataclass
+class DiarEpochResult:
+    """한 에폭(10분 청크)의 diarization 결과."""
+    epoch_idx: int
+    offset_sec: float  # 전체 오디오 내에서의 시작 위치
+    duration_sec: float
+    turns: list[DiarTurn] = field(default_factory=list)
+    # speaker_id → embedding vector (numpy array serialized as list)
+    speaker_embeddings: dict[str, list[float]] = field(default_factory=dict)
+    # local speaker_id → global speaker_id 매핑
+    speaker_map: dict[str, str] = field(default_factory=dict)
+
+
+def extract_speaker_embeddings(
+    waveform,
+    sample_rate: int,
+    turns: list[DiarTurn],
+    device: str = "cpu",
+) -> dict[str, np.ndarray]:
+    """각 화자의 발화 구간에서 임베딩 벡터를 추출한다.
+
+    각 화자의 모든 발화 구간 임베딩을 평균하여 대표 벡터를 만든다.
+    """
+    inference = get_embedding_inference(device)
+    if inference is None:
+        return {}
+
+    from pyannote.core import Segment
+
+    # 화자별 발화 구간 수집
+    speaker_segments: dict[str, list[tuple[float, float]]] = defaultdict(list)
+    for t in turns:
+        if t.end - t.start >= 0.5:  # 최소 0.5초 이상의 구간만
+            speaker_segments[t.speaker].append((t.start, t.end))
+
+    embeddings: dict[str, np.ndarray] = {}
+
+    for speaker, segments in speaker_segments.items():
+        speaker_embeds = []
+        for start, end in segments:
+            try:
+                # waveform에서 해당 구간 크롭
+                start_sample = int(start * sample_rate)
+                end_sample = min(int(end * sample_rate), waveform.shape[-1])
+                if end_sample - start_sample < sample_rate * 0.5:
+                    continue
+
+                segment_wav = waveform[:, start_sample:end_sample]
+                emb = inference({"waveform": segment_wav, "sample_rate": sample_rate})
+                if emb is not None:
+                    speaker_embeds.append(emb.flatten())
+            except Exception as e:
+                logger.debug("Embedding extraction failed for %s [%.1f-%.1f]: %s",
+                            speaker, start, end, e)
+                continue
+
+        if speaker_embeds:
+            # 모든 구간의 임베딩을 평균하여 대표 벡터 생성
+            embeddings[speaker] = np.mean(speaker_embeds, axis=0)
+            logger.debug("Speaker %s: averaged %d segment embeddings", speaker, len(speaker_embeds))
+
+    return embeddings
+
+
+def match_speakers_by_embedding(
+    prev_embeddings: dict[str, np.ndarray],
+    curr_embeddings: dict[str, np.ndarray],
+    threshold: float = 0.65,
+) -> dict[str, str]:
+    """임베딩 cosine similarity로 이전/현재 에폭의 화자를 매칭한다.
+
+    Returns:
+        curr_local_speaker → prev_global_speaker 매핑
+    """
+    if not prev_embeddings or not curr_embeddings:
+        return {}
+
+    from scipy.spatial.distance import cdist
+
+    prev_speakers = list(prev_embeddings.keys())
+    curr_speakers = list(curr_embeddings.keys())
+
+    prev_matrix = np.stack([prev_embeddings[s] for s in prev_speakers])
+    curr_matrix = np.stack([curr_embeddings[s] for s in curr_speakers])
+
+    # cosine distance → similarity (1 - distance)
+    dist_matrix = cdist(curr_matrix, prev_matrix, metric="cosine")
+    sim_matrix = 1.0 - dist_matrix
+
+    # 탐욕적 1:1 매핑 (similarity 높은 순)
+    mapping: dict[str, str] = {}
+    used_prev: set[str] = set()
+
+    # 모든 (curr, prev) 쌍을 similarity 높은 순으로 정렬
+    pairs = []
+    for ci, cs in enumerate(curr_speakers):
+        for pi, ps in enumerate(prev_speakers):
+            pairs.append((sim_matrix[ci, pi], cs, ps))
+    pairs.sort(key=lambda x: -x[0])
+
+    for sim, curr_spk, prev_spk in pairs:
+        if curr_spk in mapping or prev_spk in used_prev:
+            continue
+        if sim >= threshold:
+            mapping[curr_spk] = prev_spk
+            used_prev.add(prev_spk)
+            logger.info("Embedding match: %s → %s (similarity=%.3f)", curr_spk, prev_spk, sim)
+
+    return mapping
 
 
 def _map_speakers_across_chunks(
@@ -148,7 +290,6 @@ def _map_speakers_across_chunks(
         all_prev_globals = set(prev_map.values())
         unmapped_locals = [t.speaker for t in curr_turns if t.speaker not in curr_map]
         unmapped_globals = all_prev_globals - used_globals
-        # 발화 시간 순서로 1:1 매핑 (확실하지 않으면 새 ID가 안전하지만, 대부분 동일 화자)
         unmapped_locals_unique = list(dict.fromkeys(unmapped_locals))
         unmapped_globals_sorted = sorted(unmapped_globals)
         for local, glob in zip(unmapped_locals_unique, unmapped_globals_sorted):
@@ -183,7 +324,6 @@ def _map_speakers_across_chunks(
                 prev_offset = chunk_results[ci - 1][0]
                 prev_chunk_end = prev_offset + DIAR_CHUNK_SEC
                 if global_start < prev_chunk_end:
-                    # 이 turn이 오버랩 구간에 걸침 → 오버랩 이후 부분만 사용
                     global_start = max(global_start, prev_chunk_end - DIAR_OVERLAP_SEC / 2)
                     if global_start >= global_end:
                         continue
@@ -197,7 +337,7 @@ class DiarizationClient:
     """화자분리 클라이언트 (pyannote.audio).
 
     싱글턴 파이프라인 + 동기 diarize 메서드.
-    20분 초과 오디오는 자동 청킹 + 크로스 청크 화자 매핑.
+    인크리멘탈 모드: 10분 에폭 단위 diarization + 임베딩 기반 화자 매칭.
     """
 
     def __init__(self):
@@ -207,6 +347,7 @@ class DiarizationClient:
         if self._loaded:
             return
         get_pipeline(model_path, token, device)
+        get_embedding_inference(device)
         self._loaded = True
 
     def diarize(self, wav_path: str) -> list[DiarTurn]:
@@ -256,3 +397,37 @@ class DiarizationClient:
 
         logger.info("Diarized %d chunks, mapping speakers across chunks...", len(chunk_results))
         return _map_speakers_across_chunks(chunk_results)
+
+    def diarize_epoch(
+        self, pcm_data: bytes, sample_rate: int, offset_sec: float = 0.0,
+        device: str = "cpu",
+    ) -> tuple[list[DiarTurn], dict[str, np.ndarray]]:
+        """단일 에폭(10분 청크)을 diarize하고 화자 임베딩도 추출한다.
+
+        Args:
+            pcm_data: int16 PCM 바이트
+            sample_rate: 샘플레이트
+            offset_sec: 전체 오디오 내 이 청크의 시작 위치 (초)
+            device: 디바이스
+
+        Returns:
+            (turns, speaker_embeddings) 튜플.
+            turns는 에폭 내 로컬 시간 기준 (0부터 시작).
+            speaker_embeddings는 {speaker_id: embedding_vector} 딕셔너리.
+        """
+        import torch
+
+        audio = np.frombuffer(pcm_data, dtype=np.int16).astype(np.float32) / 32768.0
+        duration_sec = len(audio) / sample_rate
+
+        if len(audio) < sample_rate * 0.5:
+            return [], {}
+
+        logger.info("Diarize epoch: offset=%.1fs, duration=%.1fs", offset_sec, duration_sec)
+        waveform = torch.from_numpy(audio).unsqueeze(0)
+        turns = _diarize_waveform(waveform, sample_rate)
+
+        # 화자 임베딩 추출
+        embeddings = extract_speaker_embeddings(waveform, sample_rate, turns, device)
+
+        return turns, embeddings
