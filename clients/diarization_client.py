@@ -39,6 +39,8 @@ def get_pipeline(model_path: str, token: str | None = None, device: str = "cpu")
     if _pipeline is not None:
         return _pipeline
 
+    device = _resolve_diar_device(device)
+
     from pyannote.audio import Pipeline
     import torch
 
