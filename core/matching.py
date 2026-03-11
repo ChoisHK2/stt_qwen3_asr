@@ -1,13 +1,216 @@
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
+from difflib import SequenceMatcher
 
 from core.config import get_settings
 from core.models import ASRSegment, DiarTurn, TimelineTurn
 
+logger = logging.getLogger("qwen3-asr.matching")
+
 
 def _overlap(a0: float, a1: float, b0: float, b1: float) -> float:
     return max(0.0, min(a1, b1) - max(a0, b0))
+
+
+def align_final_with_chunks(
+    final_segments: list[ASRSegment],
+    chunk_segments: list[ASRSegment],
+) -> list[ASRSegment]:
+    """STT final 텍스트(고품질)를 chunk 시간 경계(고정밀)에 맞춰 재분할한다.
+
+    1. 각 final 세그먼트(60초)에 겹치는 chunk들을 찾는다.
+    2. SequenceMatcher로 final 단어 ↔ chunk 단어를 정렬한다.
+    3. 매칭된 final 단어에 chunk의 시간 경계를 상속한다.
+    4. 결과: chunk 수준의 세밀한 시간 경계 + final 수준의 텍스트 품질
+    """
+    if not final_segments:
+        return []
+    if not chunk_segments:
+        return final_segments
+
+    chunks_sorted = sorted(chunk_segments, key=lambda c: c.start)
+    result: list[ASRSegment] = []
+
+    for final_seg in sorted(final_segments, key=lambda s: s.start):
+        final_words = final_seg.text.split()
+        if not final_words:
+            continue
+
+        # 이 final 세그먼트에 겹치는 chunk들을 찾는다
+        overlapping: list[ASRSegment] = []
+        for ch in chunks_sorted:
+            if _overlap(final_seg.start, final_seg.end, ch.start, ch.end) > 0:
+                overlapping.append(ch)
+
+        if not overlapping:
+            # chunk가 없으면 final 그대로 사용
+            result.append(final_seg)
+            continue
+
+        # chunk 단어들에 시간 태그를 붙인다: (word, start_sec, end_sec)
+        tagged_chunk_words: list[tuple[str, float, float]] = []
+        for ch in overlapping:
+            ch_words = ch.text.split()
+            if not ch_words:
+                continue
+            ch_dur = ch.end - ch.start
+            n = len(ch_words)
+            for i, w in enumerate(ch_words):
+                w_start = ch.start + (i / n) * ch_dur
+                w_end = ch.start + ((i + 1) / n) * ch_dur
+                tagged_chunk_words.append((w, w_start, w_end))
+
+        if not tagged_chunk_words:
+            result.append(final_seg)
+            continue
+
+        chunk_words_only = [t[0] for t in tagged_chunk_words]
+
+        # SequenceMatcher로 final ↔ chunk 단어 정렬
+        matcher = SequenceMatcher(None, final_words, chunk_words_only, autojunk=False)
+
+        # final 각 단어의 추정 시간을 계산
+        # 매칭된 단어 → chunk 시간 상속, 매칭되지 않은 단어 → 보간
+        word_times: list[tuple[float, float]] = [(-1.0, -1.0)] * len(final_words)
+
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag == "equal":
+                # 정확히 매칭된 단어: chunk 시간 상속
+                for fi, ci in zip(range(i1, i2), range(j1, j2)):
+                    word_times[fi] = (tagged_chunk_words[ci][1], tagged_chunk_words[ci][2])
+            elif tag == "replace":
+                # 다른 단어로 대체됨: 대응하는 chunk 시간 범위에 균등 분배
+                c_start = tagged_chunk_words[j1][1]
+                c_end = tagged_chunk_words[j2 - 1][2]
+                n_final = i2 - i1
+                dur = c_end - c_start
+                for k, fi in enumerate(range(i1, i2)):
+                    word_times[fi] = (
+                        c_start + (k / n_final) * dur,
+                        c_start + ((k + 1) / n_final) * dur,
+                    )
+
+        # "insert" (final에만 있는 단어) → 주변 매칭 단어로부터 보간
+        _interpolate_missing(word_times, final_seg.start, final_seg.end)
+
+        # chunk 경계에 맞춰 final 단어를 그룹핑
+        aligned = _group_words_by_chunks(
+            final_words, word_times, overlapping,
+        )
+        result.extend(aligned)
+
+    logger.info(
+        "Aligned %d final segments with %d chunks → %d refined segments",
+        len(final_segments), len(chunk_segments), len(result),
+    )
+    return result
+
+
+def _interpolate_missing(
+    word_times: list[tuple[float, float]],
+    seg_start: float,
+    seg_end: float,
+) -> None:
+    """시간이 할당되지 않은 (-1) 단어들을 주변 값으로 보간한다 (in-place)."""
+    n = len(word_times)
+
+    for i in range(n):
+        if word_times[i][0] >= 0:
+            continue
+        # 이전에 할당된 시간 찾기
+        prev_end = seg_start
+        for p in range(i - 1, -1, -1):
+            if word_times[p][0] >= 0:
+                prev_end = word_times[p][1]
+                break
+        # 다음에 할당된 시간 찾기
+        next_start = seg_end
+        next_idx = n
+        for nx in range(i + 1, n):
+            if word_times[nx][0] >= 0:
+                next_start = word_times[nx][0]
+                next_idx = nx
+                break
+        # 연속 미할당 단어 수
+        gap_count = 0
+        for g in range(i, min(next_idx, n)):
+            if word_times[g][0] < 0:
+                gap_count += 1
+            else:
+                break
+        # 균등 분배
+        dur = next_start - prev_end
+        for k in range(gap_count):
+            ws = prev_end + (k / gap_count) * dur
+            we = prev_end + ((k + 1) / gap_count) * dur
+            word_times[i + k] = (ws, we)
+
+
+def _group_words_by_chunks(
+    words: list[str],
+    word_times: list[tuple[float, float]],
+    chunks: list[ASRSegment],
+) -> list[ASRSegment]:
+    """시간 태그가 붙은 final 단어들을 chunk 경계에 맞춰 그룹핑한다."""
+    if not words:
+        return []
+
+    # chunk 경계 생성 (start, end 쌍)
+    boundaries: list[tuple[float, float]] = []
+    for ch in sorted(chunks, key=lambda c: c.start):
+        if boundaries and abs(ch.start - boundaries[-1][1]) < 0.01:
+            # 인접 chunk → 병합하지 않고 개별 유지
+            pass
+        boundaries.append((ch.start, ch.end))
+
+    if not boundaries:
+        start = word_times[0][0]
+        end = word_times[-1][1]
+        return [ASRSegment(start=start, end=end, text=" ".join(words))]
+
+    result: list[ASRSegment] = []
+    for b_start, b_end in boundaries:
+        bucket_words: list[str] = []
+        for w, (ws, we) in zip(words, word_times):
+            w_mid = (ws + we) / 2
+            if b_start <= w_mid < b_end:
+                bucket_words.append(w)
+        if bucket_words:
+            result.append(ASRSegment(
+                start=b_start,
+                end=b_end,
+                text=" ".join(bucket_words),
+            ))
+
+    # 어떤 chunk 경계에도 들어가지 못한 단어 처리
+    assigned = set()
+    for seg in result:
+        for w in seg.text.split():
+            assigned.add(id(w))  # 이미 bucket에서 처리됨
+
+    # 빈 chunk가 없고 모든 단어가 할당되었는지 확인
+    all_assigned_words = sum(len(s.text.split()) for s in result)
+    if all_assigned_words < len(words):
+        # 미할당 단어를 마지막 세그먼트에 추가
+        remaining = []
+        used_count = 0
+        for i, w in enumerate(words):
+            w_mid = (word_times[i][0] + word_times[i][1]) / 2
+            in_any = any(b_start <= w_mid < b_end for b_start, b_end in boundaries)
+            if not in_any:
+                remaining.append(w)
+        if remaining and result:
+            result[-1].text = f"{result[-1].text} {' '.join(remaining)}"
+        elif remaining:
+            result.append(ASRSegment(
+                start=word_times[0][0],
+                end=word_times[-1][1],
+                text=" ".join(remaining),
+            ))
+
+    return result
 
 
 def _distribute_words_by_time(
