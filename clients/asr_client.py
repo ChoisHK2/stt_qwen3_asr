@@ -39,6 +39,8 @@ def _clean_asr_text(text: str) -> str:
     """모델이 삽입하는 잔여 언어 표시 및 특수 태그를 제거한다."""
     # <|...|> 형태의 잔여 태그 제거
     text = re.sub(r"<\|[^|]*\|>", "", text)
+    # <asr_text>, </asr_text> 등 XML-style 잔여 태그 제거
+    text = re.sub(r"</?asr_text>", "", text)
     # "language Korean" 등 제거
     text = _LANG_TEXT_RE.sub("", text)
     return text.strip()
