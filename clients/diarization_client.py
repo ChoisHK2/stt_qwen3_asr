@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import warnings
 import wave
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -9,6 +10,16 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from core.models import DiarTurn
+
+# ── pyannote 관련 불필요한 경고 억제 ──────────────────────────────
+# torchcodec 미설치 경고 (waveform dict 방식 사용 시 정상 작동)
+warnings.filterwarnings("ignore", message=".*torchcodec is not installed correctly.*")
+# TF32 비활성화 경고 (pyannote 재현성 위해 자동 비활성화, 정상 동작)
+warnings.filterwarnings("ignore", message=".*TensorFloat-32.*TF32.*")
+# std() degrees of freedom 경고 (짧은 오디오에서 발생, 무해)
+warnings.filterwarnings("ignore", message=".*std\\(\\): degrees of freedom is <= 0.*")
+# return_embeddings 미지원 경고 (community 모델, fallback 처리됨)
+warnings.filterwarnings("ignore", message=".*Ignoring unexpected keyword arguments: return_embeddings.*")
 
 logger = logging.getLogger("qwen3-asr.diarization")
 
@@ -67,6 +78,10 @@ def get_embedding_inference(device: str = "cpu"):
 
     diarization 파이프라인 내부의 임베딩 모델을 재사용한다.
     파이프라인이 없으면 None을 반환한다.
+
+    community 모델(speaker-diarization-community-1) 등 일부 파이프라인에서는
+    embedding 속성이 모델 인스턴스가 아닌 dict/str(설정)로 반환되므로,
+    이 경우 별도로 모델을 로드한다.
     """
     global _embedding_inference
     if _embedding_inference is not None:
@@ -77,14 +92,38 @@ def get_embedding_inference(device: str = "cpu"):
         return None
 
     try:
-        from pyannote.audio import Inference
+        from pyannote.audio import Inference, Model
         import torch
 
-        # 파이프라인 내부의 임베딩 모델 재사용
         embedding_model = _pipeline.embedding
+
+        # community 모델 등에서는 embedding이 dict 또는 str(설정값)로 반환됨
+        if isinstance(embedding_model, dict):
+            # dict 내부에서 모델 이름 추출 시도
+            model_id = embedding_model.get("embedding", None)
+            if model_id and isinstance(model_id, str):
+                logger.info("Loading embedding model from config: %s", model_id)
+                embedding_model = Model.from_pretrained(model_id)
+            else:
+                logger.warning(
+                    "Pipeline embedding is a dict without loadable model reference, "
+                    "embedding-based speaker matching disabled"
+                )
+                return None
+        elif isinstance(embedding_model, str):
+            logger.info("Loading embedding model from name: %s", embedding_model)
+            embedding_model = Model.from_pretrained(embedding_model)
+        elif not hasattr(embedding_model, "to"):
+            logger.warning(
+                "Pipeline embedding is not a model (type=%s), "
+                "embedding-based speaker matching disabled",
+                type(embedding_model).__name__,
+            )
+            return None
+
         _embedding_inference = Inference(embedding_model, window="whole")
         _embedding_inference.to(torch.device(device))
-        logger.info("Embedding inference loaded from pipeline's internal model")
+        logger.info("Embedding inference loaded successfully")
         return _embedding_inference
     except Exception as e:
         logger.warning("Failed to load embedding inference: %s", e)
