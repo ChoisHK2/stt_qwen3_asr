@@ -53,6 +53,92 @@ class SessionService:
         )
         return ssid
 
+    async def resume_session(self, ssid: str) -> dict[str, Any]:
+        """중단된 세션을 재개한다.
+
+        세션이 존재하고 TTL 내에 있으면 is_stopped를 해제하여 다시 청크를 받을 수 있게 한다.
+        세션이 없으면 에러를 반환한다.
+        """
+        meta = await self.store.get_session_meta(ssid)
+        if not meta:
+            return {"error": "SESSION_NOT_FOUND", "ssid": ssid}
+
+        sample_rate = int(meta.get("sample_rate", 16000))
+        pcm_len = await self.store.get_pcm_length(ssid)
+        audio_duration_sec = round(pcm_len / 2 / sample_rate, 2) if pcm_len else 0.0
+
+        # is_stopped 해제하여 청크 수신 재개
+        meta["is_stopped"] = False
+        await self.store.create_or_touch_session(ssid, meta)
+
+        partials = await self.store.get_partials(ssid)
+
+        return {
+            "ssid": ssid,
+            "status": "resumed",
+            "audio_duration_sec": audio_duration_sec,
+            "chunk_count": int(meta.get("chunk_count", 0)),
+            "partial_count": len(partials),
+            "last_accepted_seq": int(meta.get("last_accepted_seq", -1)),
+        }
+
+    async def get_partial_results(self, ssid: str) -> dict[str, Any]:
+        """세션의 지금까지 누적된 partial 결과를 반환한다 (finalize 없이).
+
+        연결이 끊겼을 때 지금까지 인식된 텍스트만이라도 받는 fallback용.
+        """
+        meta = await self.store.get_session_meta(ssid)
+        if not meta:
+            return {"error": "SESSION_NOT_FOUND", "ssid": ssid}
+
+        sample_rate = int(meta.get("sample_rate", 16000))
+        partials = await self.store.get_partials(ssid)
+        pcm_len = await self.store.get_pcm_length(ssid)
+        audio_duration_sec = round(pcm_len / 2 / sample_rate, 2) if pcm_len else 0.0
+
+        stt_final_items = await self.store.get_stt_final(ssid)
+
+        partial_texts = []
+        for p in sorted(partials, key=lambda x: x.get("start_ms", 0)):
+            text = (p.get("text") or "").strip()
+            if text:
+                partial_texts.append({
+                    "start_ms": p.get("start_ms", 0),
+                    "end_ms": p.get("end_ms", 0),
+                    "text": text,
+                })
+
+        full_text = " ".join(t["text"] for t in partial_texts).strip()
+
+        if stt_final_items:
+            full_text = " ".join(
+                (item.get("text") or "").strip()
+                for item in sorted(stt_final_items, key=lambda x: x.get("start_ms", 0))
+                if (item.get("text") or "").strip()
+            ).strip()
+
+        diar_epochs = await self.store.get_diar_epochs(ssid)
+        diar_segments = []
+        for ep in diar_epochs:
+            diar_segments.extend(ep.get("turns", []))
+
+        st = await self.store.get_status(ssid)
+
+        return {
+            "ssid": ssid,
+            "status": "partial",
+            "is_stopped": meta.get("is_stopped", False),
+            "audio_duration_sec": audio_duration_sec,
+            "chunk_count": int(meta.get("chunk_count", 0)),
+            "partial_count": len(partial_texts),
+            "full_text": full_text,
+            "partial_items": partial_texts,
+            "stt_final_items": stt_final_items,
+            "diar_segments": diar_segments,
+            "diar_status": st.get("diar_status", "idle"),
+            "stt_final_status": st.get("stt_final_status", "idle"),
+        }
+
     async def ingest_chunk(
         self, ssid: str, seq: int, raw: bytes, t0: float | None = None, realtime: bool = True,
     ) -> dict[str, Any]:
@@ -63,13 +149,13 @@ class SessionService:
         if meta.get("is_stopped"):
             return {"error": "SESSION_STOPPED", "backlog_hint": "paused"}
 
-        # Audio duration limit
+        # Audio duration limit — append to disk, get total length
         pcm_total = await self.store.append_pcm(ssid, raw)
         new_duration = (pcm_total / 2) / sample_rate
         if new_duration > self.settings.max_session_audio_sec:
             return {"error": "AUDIO_LIMIT_EXCEEDED", "backlog_hint": "paused"}
 
-        unique = await self.store.record_chunk(ssid, seq, raw)
+        unique = await self.store.record_chunk(ssid, seq)
         if not unique:
             status = await self.store.get_status(ssid)
             return {
@@ -102,14 +188,12 @@ class SessionService:
         interval = self.settings.diar_chunk_interval_sec
         if interval > 0:
             prev_duration = (pcm_before / 2) / sample_rate
-            # 이전 에폭 수 vs 현재 에폭 수 비교
             prev_epoch_count = int(prev_duration // interval)
             curr_epoch_count = int(new_duration // interval)
             if curr_epoch_count > prev_epoch_count:
-                # 새 에폭 경계를 넘음 → 인크리멘탈 diar 트리거
                 epoch_idx = curr_epoch_count - 1
-                epoch_start_byte = epoch_idx * interval * sample_rate * 2
-                epoch_end_byte = (epoch_idx + 1) * interval * sample_rate * 2
+                epoch_start_byte = int(epoch_idx * interval * sample_rate * 2)
+                epoch_end_byte = int((epoch_idx + 1) * interval * sample_rate * 2)
                 asyncio.create_task(
                     self._run_incremental_diar_epoch(
                         ssid, epoch_idx, epoch_start_byte, epoch_end_byte, sample_rate,
@@ -159,9 +243,9 @@ class SessionService:
     async def status(self, ssid: str) -> dict[str, Any]:
         st = await self.store.get_status(ssid)
         meta = await self.store.get_session_meta(ssid)
-        pcm_data = await self.store.get_pcm(ssid)
         sample_rate = int(meta.get("sample_rate", 16000))
-        audio_duration_sec = round(len(pcm_data) / 2 / sample_rate, 2) if pcm_data else 0.0
+        pcm_len = await self.store.get_pcm_length(ssid)
+        audio_duration_sec = round(pcm_len / 2 / sample_rate, 2) if pcm_len else 0.0
         return {
             "ssid": ssid,
             "is_stopped": meta.get("is_stopped", False),
@@ -180,7 +264,6 @@ class SessionService:
     ) -> None:
         """10분 에폭에 대해 diarization + 임베딩 추출을 수행한다."""
         try:
-            # diarization 소스 확인
             diarization_source = self._get_diar_source()
             if not diarization_source:
                 return
@@ -194,27 +277,23 @@ class SessionService:
             async with self._diar_semaphore:
                 logger.info("Incremental diar epoch %d started for %s", epoch_idx, ssid[:8])
 
-                # PCM 데이터에서 해당 에폭 구간 추출
-                pcm_data = await self.store.get_pcm(ssid)
-                epoch_pcm = pcm_data[start_byte:min(end_byte, len(pcm_data))]
+                # 디스크에서 해당 에폭 구간만 읽기
+                epoch_pcm = await self.store.get_pcm_slice(ssid, start_byte, end_byte)
 
                 if len(epoch_pcm) < sample_rate * 2:  # 최소 1초
                     return
 
-                # diar 모델 로드 + 에폭 diarize
                 token = self._get_diar_token(diarization_source)
                 turns, embeddings = await asyncio.to_thread(
                     self._diarize_epoch_sync,
                     diarization_source, token, epoch_pcm, sample_rate, offset_sec,
                 )
 
-                # 이전 에폭들의 임베딩과 매칭하여 글로벌 화자 ID 결정
                 prev_epochs = await self.store.get_diar_epochs(ssid)
                 speaker_map = self._resolve_speaker_map(
                     prev_epochs, turns, embeddings, epoch_idx,
                 )
 
-                # 글로벌 시간 + 글로벌 화자 ID로 변환
                 global_turns = []
                 for t in turns:
                     global_speaker = speaker_map.get(t.speaker, t.speaker)
@@ -224,7 +303,6 @@ class SessionService:
                         "end": t.end + offset_sec,
                     })
 
-                # 글로벌 임베딩 (매핑 적용)
                 global_embeddings = {}
                 for local_spk, emb in embeddings.items():
                     global_spk = speaker_map.get(local_spk, local_spk)
@@ -276,7 +354,6 @@ class SessionService:
         epoch_idx: int,
     ) -> dict[str, str]:
         """이전 에폭의 임베딩과 비교하여 화자 매핑을 결정한다."""
-        # 이전 에폭들의 글로벌 임베딩 수집 (가장 최근 것 우선)
         all_prev_embeddings: dict[str, np.ndarray] = {}
         for ep in reversed(prev_epochs):
             for spk, emb_list in ep.get("speaker_embeddings", {}).items():
@@ -284,7 +361,6 @@ class SessionService:
                     all_prev_embeddings[spk] = np.array(emb_list)
 
         if not all_prev_embeddings or not curr_embeddings:
-            # 첫 에폭이거나 임베딩이 없으면 순차 할당
             speaker_map: dict[str, str] = {}
             existing_count = len(all_prev_embeddings)
             counter = existing_count
@@ -294,14 +370,12 @@ class SessionService:
                     counter += 1
             return speaker_map
 
-        # 임베딩 기반 매칭
         embedding_map = match_speakers_by_embedding(
             all_prev_embeddings,
             curr_embeddings,
             threshold=self.settings.diar_embedding_threshold,
         )
 
-        # 매칭되지 않은 화자에 새 글로벌 ID 할당
         existing_globals = set(all_prev_embeddings.keys()) | set(embedding_map.values())
         max_idx = 0
         for g in existing_globals:
@@ -328,10 +402,11 @@ class SessionService:
         # Mark stopped
         await self.store.create_or_touch_session(ssid, {**meta, "is_stopped": True})
 
-        # Save WAV
+        # 디스크에서 PCM 읽어서 WAV 저장
         pcm_data = await self.store.get_pcm(ssid)
-        os.makedirs("data/audio", exist_ok=True)
-        wav_path = f"data/audio/{ssid}.wav"
+        audio_dir = self.settings.audio_data_dir
+        os.makedirs(audio_dir, exist_ok=True)
+        wav_path = os.path.join(audio_dir, f"{ssid}.wav")
         self._write_wav(wav_path, pcm_data, sample_rate)
 
         await self.store.set_status(ssid, {
@@ -340,7 +415,7 @@ class SessionService:
             "diar_status": "running",
         })
 
-        # Background tasks
+        # Background tasks — pcm_data already in memory, pass directly
         asyncio.create_task(self._run_stt_final_background(ssid, pcm_data, sample_rate))
         asyncio.create_task(self._run_diarization_remaining(ssid, pcm_data, sample_rate))
 
@@ -381,7 +456,6 @@ class SessionService:
                 start_ms = int(start_sample * 1000 / sample_rate)
                 end_ms = int(end_sample * 1000 / sample_rate)
 
-                # Convert to float32 for ASR
                 audio = np.frombuffer(segment_pcm, dtype="<i2").astype(np.float32) / 32768.0
                 segs, _err = await self.asr.transcribe_partial(audio, sample_rate)
                 text = " ".join(s.text for s in segs).strip()
@@ -425,13 +499,11 @@ class SessionService:
             async with self._diar_semaphore:
                 await self.store.set_status(ssid, {"diar_status": "running"})
 
-                # 이미 처리된 에폭 확인
                 prev_epochs = await self.store.get_diar_epochs(ssid)
                 interval = self.settings.diar_chunk_interval_sec
                 total_duration = len(pcm_data) / 2 / sample_rate
 
                 if interval > 0 and prev_epochs:
-                    # 마지막 에폭 이후의 잔여분만 처리
                     completed_epochs = len(prev_epochs)
                     remaining_start_sec = completed_epochs * interval
                     remaining_start_byte = int(remaining_start_sec * sample_rate * 2)
@@ -452,12 +524,10 @@ class SessionService:
                             sample_rate, remaining_start_sec,
                         )
 
-                        # 화자 매핑
                         speaker_map = self._resolve_speaker_map(
                             prev_epochs, turns, embeddings, completed_epochs,
                         )
 
-                        # 잔여분 에폭 저장
                         global_turns = []
                         for t in turns:
                             global_spk = speaker_map.get(t.speaker, t.speaker)
@@ -484,7 +554,6 @@ class SessionService:
                     else:
                         logger.info("Diar remaining for %s: no remaining audio", ssid[:8])
 
-                    # 모든 에폭의 turns를 합쳐서 최종 결과 생성
                     all_epochs = await self.store.get_diar_epochs(ssid)
                     all_segments = []
                     for ep in all_epochs:
@@ -501,7 +570,7 @@ class SessionService:
                 else:
                     # 인크리멘탈 에폭이 없음 → 전체 fallback
                     logger.info("No incremental epochs for %s, full diarization fallback", ssid[:8])
-                    wav_path = f"data/audio/{ssid}.wav"
+                    wav_path = os.path.join(self.settings.audio_data_dir, f"{ssid}.wav")
                     token = self._get_diar_token(diarization_source)
                     diar_result = await asyncio.to_thread(
                         self._diarize_sync, diarization_source, token, wav_path,
@@ -548,7 +617,6 @@ class SessionService:
                 ))
 
         if stt_final_items:
-            # stt_final → ASRSegment (텍스트 품질용)
             final_segments: list[ASRSegment] = []
             for item in stt_final_items:
                 text = (item.get("text") or "").strip()
@@ -559,7 +627,6 @@ class SessionService:
                         text=text,
                     ))
 
-            # final 텍스트를 chunk 시간 경계에 맞춰 재분할
             if chunk_segments:
                 asr_segments = align_final_with_chunks(final_segments, chunk_segments)
                 stt_source = "final+chunk_aligned"
@@ -589,11 +656,12 @@ class SessionService:
         if diar_status not in ("done", "error"):
             wav_path = st.get("audio_path", "")
             if not wav_path:
-                # Build WAV from PCM
+                # Build WAV from disk PCM
                 pcm_data = await self.store.get_pcm(ssid)
                 if pcm_data:
-                    os.makedirs("data/audio", exist_ok=True)
-                    wav_path = f"data/audio/{ssid}.wav"
+                    audio_dir = self.settings.audio_data_dir
+                    os.makedirs(audio_dir, exist_ok=True)
+                    wav_path = os.path.join(audio_dir, f"{ssid}.wav")
                     self._write_wav(wav_path, pcm_data, sample_rate)
 
             diarization_source = self._get_diar_source()
@@ -613,7 +681,6 @@ class SessionService:
         diar_turns = [DiarTurn(**d) for d in diar_segments] if diar_segments else []
         timeline = [t.__dict__ for t in map_speakers(asr_segments, diar_turns)]
 
-        # Build raw data for partials (per-chunk STT items)
         raw_stt_items = []
         for p in partials:
             if p.get("text"):
@@ -623,8 +690,8 @@ class SessionService:
                     "text": p["text"],
                 })
 
-        pcm_data = await self.store.get_pcm(ssid)
-        audio_duration_sec = round(len(pcm_data) / 2 / sample_rate, 2) if pcm_data else 0.0
+        pcm_len = await self.store.get_pcm_length(ssid)
+        audio_duration_sec = round(pcm_len / 2 / sample_rate, 2) if pcm_len else 0.0
 
         return {
             "ssid": ssid,

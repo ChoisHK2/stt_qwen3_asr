@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
+
+import aiofiles
+import aiofiles.os
 
 from redis.asyncio import Redis
 
@@ -23,9 +27,6 @@ class RedisStore:
     def _seq_key(self, ssid: str) -> str:
         return f"session:{ssid}:seq"
 
-    def _chunks_key(self, ssid: str) -> str:
-        return f"session:{ssid}:chunks"
-
     def _partials_key(self, ssid: str) -> str:
         return f"session:{ssid}:partials"
 
@@ -37,7 +38,6 @@ class RedisStore:
         await self.redis.hset(key, mapping={k: json.dumps(v).encode() for k, v in payload.items()})
         await self.redis.expire(key, self.settings.session_ttl_sec)
         await self.redis.expire(self._seq_key(ssid), self.settings.session_ttl_sec)
-        await self.redis.expire(self._chunks_key(ssid), self.settings.session_ttl_sec)
         await self.redis.expire(self._partials_key(ssid), self.settings.session_ttl_sec)
         await self.redis.expire(self._status_key(ssid), self.settings.session_ttl_sec)
 
@@ -45,15 +45,10 @@ class RedisStore:
         data = await self.redis.hgetall(self._session_key(ssid))
         return {k.decode(): json.loads(v) for k, v in data.items()} if data else {}
 
-    async def record_chunk(self, ssid: str, seq: int, payload: bytes) -> bool:
-        seq_key = self._seq_key(ssid)
-        added = await self.redis.sadd(seq_key, str(seq))
-        if added:
-            await self.redis.hset(self._chunks_key(ssid), str(seq), payload)
+    async def record_chunk(self, ssid: str, seq: int) -> bool:
+        """Record chunk sequence number for dedup. Returns True if new."""
+        added = await self.redis.sadd(self._seq_key(ssid), str(seq))
         return bool(added)
-
-    async def get_chunk(self, ssid: str, seq: int) -> bytes | None:
-        return await self.redis.hget(self._chunks_key(ssid), str(seq))
 
     async def set_status(self, ssid: str, mapping: dict[str, Any]) -> None:
         await self.redis.hset(
@@ -110,19 +105,44 @@ class RedisStore:
             count += 1
         return count
 
-    # ── Full PCM storage (for final re-processing) ─────────────────
+    # ── Disk-based PCM storage ──────────────────────────────────────
 
-    def _pcm_key(self, ssid: str) -> str:
-        return f"session:{ssid}:pcm"
+    def _pcm_len_key(self, ssid: str) -> str:
+        return f"session:{ssid}:pcm_len"
+
+    def _pcm_path(self, ssid: str) -> str:
+        return os.path.join(self.settings.audio_data_dir, f"{ssid}.raw")
 
     async def append_pcm(self, ssid: str, pcm_bytes: bytes) -> int:
-        """Append PCM data and return total length in bytes."""
-        key = self._pcm_key(ssid)
-        await self.redis.append(key, pcm_bytes)
-        length = await self.redis.strlen(key)
-        await self.redis.expire(key, self.settings.session_ttl_sec)
-        return length
+        """Append PCM data to disk file and return total length in bytes."""
+        path = self._pcm_path(ssid)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        async with aiofiles.open(path, "ab") as f:
+            await f.write(pcm_bytes)
+        new_len = await self.redis.incrby(self._pcm_len_key(ssid), len(pcm_bytes))
+        await self.redis.expire(self._pcm_len_key(ssid), self.settings.session_ttl_sec)
+        return new_len
+
+    async def get_pcm_length(self, ssid: str) -> int:
+        """Return total PCM bytes stored (from Redis counter, no disk I/O)."""
+        raw = await self.redis.get(self._pcm_len_key(ssid))
+        return int(raw) if raw else 0
 
     async def get_pcm(self, ssid: str) -> bytes:
-        raw = await self.redis.get(self._pcm_key(ssid))
-        return raw or b""
+        """Read entire PCM from disk."""
+        path = self._pcm_path(ssid)
+        try:
+            async with aiofiles.open(path, "rb") as f:
+                return await f.read()
+        except FileNotFoundError:
+            return b""
+
+    async def get_pcm_slice(self, ssid: str, start_byte: int, end_byte: int) -> bytes:
+        """Read a byte range from the PCM file on disk."""
+        path = self._pcm_path(ssid)
+        try:
+            async with aiofiles.open(path, "rb") as f:
+                await f.seek(start_byte)
+                return await f.read(end_byte - start_byte)
+        except FileNotFoundError:
+            return b""

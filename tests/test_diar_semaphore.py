@@ -25,12 +25,13 @@ def _make_service(max_concurrent_diar: int = 2) -> SessionService:
     store.set_status = AsyncMock()
     store.get_diar_epochs = AsyncMock(return_value=[])
     store.get_pcm = AsyncMock(return_value=b"\x00" * 32000)  # 1 sec of audio
+    store.get_pcm_length = AsyncMock(return_value=32000)
 
     with patch("core.session_service.get_settings") as mock_settings:
         settings = MagicMock()
         settings.max_concurrent_diar = max_concurrent_diar
         settings.max_concurrent_asr = 32
-        settings.pyannote_local_path = "/models/pyannote"
+        settings.pyannote_local_path = "/app/models/pyannote"
         settings.pyannote_token = None
         settings.pyannote_model = "pyannote/speaker-diarization-community-1"
         settings.diar_device = "cpu"

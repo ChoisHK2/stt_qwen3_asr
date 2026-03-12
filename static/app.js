@@ -48,6 +48,9 @@ createApp({
       // Active sessions
       activeSessions: null,
       activeSessionTimer: null,
+      // Session recovery
+      recoverySession: null, // { ssid, audio_duration_sec, chunk_count }
+      recoveryBusy: false,
       // DEV: debug raw data
       showDebug: false,
       rawSttItems: [],
@@ -92,6 +95,102 @@ createApp({
       this.lastMetrics = null;
       this.timeline = [];
       this.fullText = "";
+      this.recoverySession = null;
+      // localStorage에 활성 세션 저장
+      try { localStorage.setItem("qwen3_active_session", this.sessionId); } catch {}
+    },
+    // ── Session recovery ───────────────────────────────────
+    async checkRecoverableSession() {
+      try {
+        const saved = localStorage.getItem("qwen3_active_session");
+        if (!saved) return;
+        const st = await this.api(`/api/session/${saved}/status`);
+        if (st.ssid) {
+          this.recoverySession = {
+            ssid: saved,
+            audio_duration_sec: st.audio_duration_sec || 0,
+            is_stopped: st.is_stopped || false,
+            chunk_count: st.chunk_count || 0,
+          };
+        }
+      } catch {
+        // 세션 만료 등 — 복구 불가
+        try { localStorage.removeItem("qwen3_active_session"); } catch {}
+      }
+    },
+    async resumeRecording() {
+      if (!this.recoverySession) return;
+      this.recoveryBusy = true;
+      try {
+        const r = await this.api(`/api/session/${this.recoverySession.ssid}/resume`, { method: "POST" });
+        this.sessionId = r.ssid;
+        this.chunkSeq = (r.last_accepted_seq || 0) + 1;
+        this.chunkCount = r.chunk_count || 0;
+        this.recordingTime = Math.floor(r.audio_duration_sec || 0);
+        this.recoverySession = null;
+        // 마이크 시작
+        const mic = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+        });
+        this.micStream = mic;
+        this.mode = "offline";
+        this.setupCapture(mic, null);
+        this.phase = "recording";
+        this.startActiveSessionPolling();
+      } catch (e) {
+        this.errorMsg = `세션 재개 실패: ${e.message}`;
+      } finally {
+        this.recoveryBusy = false;
+      }
+    },
+    async getPartialResults() {
+      if (!this.recoverySession) return;
+      this.recoveryBusy = true;
+      try {
+        const ssid = this.recoverySession.ssid;
+        this.sessionId = ssid;
+        // 먼저 stop 시도 (아직 안 멈춘 경우)
+        if (!this.recoverySession.is_stopped) {
+          try { await this.api(`/api/session/${ssid}/stop`, { method: "POST" }); } catch {}
+          await this._pollUntilDone();
+        }
+        // finalize 시도, 실패하면 partial-results fallback
+        let r;
+        try {
+          // stt_final, diar가 완료됐으면 finalize가 더 좋은 결과
+          r = await this.api(`/api/session/${ssid}/finalize`, { method: "POST" });
+          this.timeline = (r.timeline || []).map((t) => ({ ...t }));
+          this.fullText = r.full_text || "";
+          this.rawSttItems = r.raw_stt_items || [];
+          this.rawDiarSegments = r.raw_diar_segments || [];
+          this.rawSttFinalItems = r.raw_stt_final_items || [];
+        } catch {
+          // finalize 실패 → partial-results fallback
+          r = await this.api(`/api/session/${ssid}/partial-results`);
+          this.fullText = r.full_text || "";
+          this.timeline = (r.partial_items || []).map((p) => ({
+            speaker: "SPEAKER_00",
+            start: (p.start_ms || 0) / 1000,
+            end: (p.end_ms || 0) / 1000,
+            text: p.text,
+          }));
+        }
+        this.recoverySession = null;
+        try { localStorage.removeItem("qwen3_active_session"); } catch {}
+        this.phase = "results";
+        if (this.timeline.length === 0 && !this.fullText) {
+          this.errorMsg = "복구 가능한 텍스트가 없습니다.";
+          this.phase = "idle";
+        }
+      } catch (e) {
+        this.errorMsg = `결과 조회 실패: ${e.message}`;
+      } finally {
+        this.recoveryBusy = false;
+      }
+    },
+    dismissRecovery() {
+      this.recoverySession = null;
+      try { localStorage.removeItem("qwen3_active_session"); } catch {}
     },
     // ── Audio helpers ─────────────────────────────────────
     downsample(buf, fromRate, toRate) {
@@ -326,6 +425,7 @@ createApp({
         this.rawDiarSegments = r.raw_diar_segments || [];
         this.rawSttFinalItems = r.raw_stt_final_items || [];
         this.phase = "results";
+        try { localStorage.removeItem("qwen3_active_session"); } catch {}
         if (this.timeline.length === 0 && !this.fullText) {
           this.errorMsg = "음성이 감지되지 않았습니다.";
         }
@@ -485,6 +585,9 @@ createApp({
       this.muted = false;
       this.mutedTime = 0;
       this.activeSessions = null;
+      this.recoverySession = null;
+      this.recoveryBusy = false;
+      try { localStorage.removeItem("qwen3_active_session"); } catch {}
       this.showDebug = false;
       this.rawSttItems = [];
       this.rawDiarSegments = [];
@@ -545,6 +648,9 @@ createApp({
       a.click();
       setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 500);
     },
+  },
+  mounted() {
+    this.checkRecoverableSession();
   },
   beforeUnmount() {
     this.cleanup();

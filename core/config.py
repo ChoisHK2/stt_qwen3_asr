@@ -8,7 +8,7 @@ class Settings:
     app_host: str = "0.0.0.0"
     app_port: int = 8000
     redis_url: str = "redis://localhost:6379/0"
-    session_ttl_sec: int = 10800
+    session_ttl_sec: int = 14400
     partial_mode: str = "on"
     overload_http_code: int = 429
     max_concurrent_asr: int = 32
@@ -22,7 +22,7 @@ class Settings:
     vllm_model: str = "Qwen/Qwen3-ASR-0.6B"
     asr_timeout_sec: int = 30
     pyannote_model: str = "pyannote/speaker-diarization-community-1"
-    pyannote_local_path: str = "/models/pyannote/speaker-diarization-community-1"
+    pyannote_local_path: str = "/app/models/pyannote/speaker-diarization-community-1"
     pyannote_token: str | None = None
     diar_device: str = "cpu"
     matching_fallback: str = "segment_majority"
@@ -37,7 +37,8 @@ class Settings:
     stt_final_chunk_sec: int = 60  # stop 후 재처리 세그먼트 크기(초)
     max_session_audio_sec: int = 7200  # 세션당 최대 오디오 길이(초)
     finalize_async_threshold_sec: float = 480
-    model_dir: str = "/models"
+    audio_data_dir: str = "data/audio"
+    model_dir: str = "/app/models"
     ssl_keyfile: str = ""
     ssl_certfile: str = ""
 
@@ -52,7 +53,7 @@ def get_settings() -> Settings:
         app_host=os.getenv("APP_HOST", "0.0.0.0"),
         app_port=int(os.getenv("APP_PORT", "8000")),
         redis_url=os.getenv("REDIS_URL", "redis://localhost:6379/0"),
-        session_ttl_sec=int(os.getenv("SESSION_TTL_SEC", "10800")),
+        session_ttl_sec=int(os.getenv("SESSION_TTL_SEC", "14400")),
         partial_mode=os.getenv("PARTIAL_MODE", "on"),
         overload_http_code=int(os.getenv("OVERLOAD_HTTP_CODE", "429")),
         max_concurrent_asr=int(os.getenv("MAX_CONCURRENT_ASR", "32")),
@@ -66,7 +67,7 @@ def get_settings() -> Settings:
         vllm_model=os.getenv("VLLM_MODEL", "Qwen/Qwen3-ASR-0.6B"),
         asr_timeout_sec=int(os.getenv("ASR_TIMEOUT_SEC", "30")),
         pyannote_model=os.getenv("PYANNOTE_MODEL", "pyannote/speaker-diarization-community-1"),
-        pyannote_local_path=os.getenv("PYANNOTE_LOCAL_PATH", "/models/pyannote/speaker-diarization-community-1"),
+        pyannote_local_path=os.getenv("PYANNOTE_LOCAL_PATH", "/app/models/pyannote/speaker-diarization-community-1"),
         pyannote_token=os.getenv("PYANNOTE_TOKEN") or None,
         diar_device=os.getenv("DIAR_DEVICE", "cpu"),
         matching_fallback=os.getenv("MATCHING_FALLBACK", "segment_majority"),
@@ -81,7 +82,8 @@ def get_settings() -> Settings:
         stt_final_chunk_sec=int(os.getenv("STT_FINAL_CHUNK_SEC", "60")),
         max_session_audio_sec=int(os.getenv("MAX_SESSION_AUDIO_SEC", "7200")),
         finalize_async_threshold_sec=float(os.getenv("FINALIZE_ASYNC_THRESHOLD_SEC", "480")),
-        model_dir=os.getenv("MODEL_DIR", "/models"),
+        audio_data_dir=os.getenv("AUDIO_DATA_DIR", "data/audio"),
+        model_dir=os.getenv("MODEL_DIR", "/app/models"),
         ssl_keyfile=os.getenv("SSL_KEYFILE", ""),
         ssl_certfile=os.getenv("SSL_CERTFILE", ""),
     )
