@@ -19,7 +19,7 @@ echo "[entrypoint] Redis started on port 6379"
 ########################################
 # 2) 모델 경로 검증
 ########################################
-VLLM_MODEL_PATH="${VLLM_MODEL_PATH:-/models/Qwen3-ASR-0.6B}"
+VLLM_MODEL_PATH="${VLLM_MODEL_PATH:-/app/models/Qwen3-ASR-0.6B}"
 VLLM_MODEL_NAME="${VLLM_MODEL_NAME:-Qwen/Qwen3-ASR-0.6B}"
 VLLM_PORT="${VLLM_PORT:-8001}"
 VLLM_GPU_UTIL="${VLLM_GPU_UTIL:-0.85}"
@@ -28,8 +28,8 @@ VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-4}"
 
 if [ ! -d "${VLLM_MODEL_PATH}" ]; then
   echo "[entrypoint] ERROR: Model not found at ${VLLM_MODEL_PATH}"
-  echo "[entrypoint] Did you forget -v /path/to/models:/models ?"
-  echo "[entrypoint] Example: docker run --gpus all -v ./models:/models ..."
+  echo "[entrypoint] Model files should be at /app/models/ inside the container"
+  echo "[entrypoint] Or override with: -e VLLM_MODEL_PATH=/your/path"
   exit 1
 fi
 

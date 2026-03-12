@@ -3,8 +3,8 @@
 # Redis + vLLM(qwen-asr-serve) + FastAPI를 하나의 컨테이너에서 실행
 #
 # 빌드:  docker build -t qwen3-stt .
-# HTTP:  docker run --gpus all --env-file .env -v ./models:/models -v ./data:/app/data -p 8000:8000 qwen3-stt
-# HTTPS: docker run --gpus all --env-file .env -v ./models:/models -v ./data:/app/data -v ./cert:/cert \
+# HTTP:  docker run --gpus all --env-file .env -v ./data:/app/data -p 8000:8000 qwen3-stt
+# HTTPS: docker run --gpus all --env-file .env -v ./data:/app/data -v ./cert:/cert \
 #          -e SSL_KEYFILE=/cert/key.pem -e SSL_CERTFILE=/cert/cert.pem -p 8000:8000 qwen3-stt
 # ============================================================
 FROM qwenllm/qwen3-asr:latest
@@ -49,7 +49,7 @@ ENV HF_DATASETS_OFFLINE=1
 ENV DIAR_DEVICE=auto
 
 # vLLM 서버 설정 (entrypoint.sh에서 사용)
-ENV VLLM_MODEL_PATH=/models/Qwen3-ASR-0.6B
+ENV VLLM_MODEL_PATH=/app/models/Qwen3-ASR-0.6B
 ENV VLLM_MODEL_NAME=Qwen/Qwen3-ASR-0.6B
 ENV VLLM_PORT=8001
 ENV VLLM_GPU_UTIL=0.85
