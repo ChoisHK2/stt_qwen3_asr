@@ -37,6 +37,7 @@ def _make_service(max_concurrent_diar: int = 2) -> SessionService:
         settings.diar_device = "cpu"
         settings.diar_chunk_interval_sec = 600
         settings.diar_embedding_threshold = 0.65
+        settings.audio_data_dir = "data/audio"
         mock_settings.return_value = settings
         svc = SessionService(store)
 
@@ -74,7 +75,7 @@ async def test_diar_semaphore_limits_concurrency():
     with patch("core.session_service.os.path.isdir", return_value=True):
         tasks = [
             asyncio.create_task(
-                svc._run_diarization_remaining(f"sess-{i}", b"\x00" * 32000, 16000)
+                svc._run_diarization_remaining(f"sess-{i}", 16000)
             )
             for i in range(5)
         ]

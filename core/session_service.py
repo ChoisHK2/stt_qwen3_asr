@@ -31,12 +31,34 @@ class SessionService:
         self.settings = get_settings()
         self.asr = ASRClient()
         self.diar = DiarizationClient()
+        self._background_tasks: dict[str, set[asyncio.Task]] = {}  # ssid → tasks
         # Lazy-init class-level semaphore (must be created inside running loop)
         if SessionService._diar_semaphore is None:
             SessionService._diar_semaphore = asyncio.Semaphore(self.settings.max_concurrent_diar)
 
     async def close(self):
+        # Cancel all tracked background tasks
+        for ssid, tasks in self._background_tasks.items():
+            for t in tasks:
+                t.cancel()
+        self._background_tasks.clear()
         await self.asr.close()
+
+    def _track_task(self, ssid: str, task: asyncio.Task) -> None:
+        """Background task를 세션별로 추적한다."""
+        if ssid not in self._background_tasks:
+            self._background_tasks[ssid] = set()
+        self._background_tasks[ssid].add(task)
+        task.add_done_callback(lambda t: self._background_tasks.get(ssid, set()).discard(t))
+
+    async def cancel_session_tasks(self, ssid: str) -> None:
+        """세션의 모든 background task를 취소한다."""
+        tasks = self._background_tasks.pop(ssid, set())
+        for t in tasks:
+            t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+            logger.info("Cancelled %d background tasks for %s", len(tasks), ssid[:8])
 
     async def start_session(self, sample_rate: int, channels: int, chunk_sec: int = 2, ssid: str | None = None):
         ssid = ssid or str(ulid.new())
@@ -194,11 +216,12 @@ class SessionService:
                 epoch_idx = curr_epoch_count - 1
                 epoch_start_byte = int(epoch_idx * interval * sample_rate * 2)
                 epoch_end_byte = int((epoch_idx + 1) * interval * sample_rate * 2)
-                asyncio.create_task(
+                task = asyncio.create_task(
                     self._run_incremental_diar_epoch(
                         ssid, epoch_idx, epoch_start_byte, epoch_end_byte, sample_rate,
                     )
                 )
+                self._track_task(ssid, task)
 
         # realtime=False: 오디오 저장만, STT 스킵
         if not realtime:
@@ -402,12 +425,12 @@ class SessionService:
         # Mark stopped
         await self.store.create_or_touch_session(ssid, {**meta, "is_stopped": True})
 
-        # 디스크에서 PCM 읽어서 WAV 저장
-        pcm_data = await self.store.get_pcm(ssid)
+        # WAV 저장 — PCM을 스트리밍으로 변환 (전체를 메모리에 올리지 않음)
         audio_dir = self.settings.audio_data_dir
         os.makedirs(audio_dir, exist_ok=True)
         wav_path = os.path.join(audio_dir, f"{ssid}.wav")
-        self._write_wav(wav_path, pcm_data, sample_rate)
+        pcm_len = await self.store.get_pcm_length(ssid)
+        await self._write_wav_from_disk(wav_path, ssid, pcm_len, sample_rate)
 
         await self.store.set_status(ssid, {
             "audio_path": wav_path,
@@ -415,9 +438,11 @@ class SessionService:
             "diar_status": "running",
         })
 
-        # Background tasks — pcm_data already in memory, pass directly
-        asyncio.create_task(self._run_stt_final_background(ssid, pcm_data, sample_rate))
-        asyncio.create_task(self._run_diarization_remaining(ssid, pcm_data, sample_rate))
+        # Background tasks — 디스크 경로 기반, 메모리에 전체 PCM 로드 안 함
+        t1 = asyncio.create_task(self._run_stt_final_background(ssid, sample_rate))
+        t2 = asyncio.create_task(self._run_diarization_remaining(ssid, sample_rate))
+        self._track_task(ssid, t1)
+        self._track_task(ssid, t2)
 
         return {
             "ssid": ssid,
@@ -434,12 +459,30 @@ class SessionService:
             w.setframerate(sample_rate)
             w.writeframes(pcm_data)
 
+    async def _write_wav_from_disk(
+        self, wav_path: str, ssid: str, pcm_len: int, sample_rate: int,
+    ) -> None:
+        """PCM을 전체 메모리에 올리지 않고 청크 단위로 WAV로 변환한다."""
+        CHUNK = 1024 * 1024  # 1MB씩 읽기
+        with wave.open(wav_path, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(sample_rate)
+            offset = 0
+            while offset < pcm_len:
+                end = min(offset + CHUNK, pcm_len)
+                chunk = await self.store.get_pcm_slice(ssid, offset, end)
+                if not chunk:
+                    break
+                w.writeframes(chunk)
+                offset = end
+
     # ── Background STT re-processing (larger segments) ─────────────
 
-    async def _run_stt_final_background(self, ssid: str, pcm_data: bytes, sample_rate: int) -> None:
+    async def _run_stt_final_background(self, ssid: str, sample_rate: int) -> None:
         try:
             segment_bytes = self.settings.stt_final_chunk_sec * sample_rate * 2
-            total_bytes = len(pcm_data)
+            total_bytes = await self.store.get_pcm_length(ssid)
             if total_bytes == 0:
                 await self.store.set_stt_final(ssid, [])
                 await self.store.set_status(ssid, {"stt_final_status": "done"})
@@ -449,7 +492,7 @@ class SessionService:
             offset = 0
             while offset < total_bytes:
                 end = min(offset + segment_bytes, total_bytes)
-                segment_pcm = pcm_data[offset:end]
+                segment_pcm = await self.store.get_pcm_slice(ssid, offset, end)
 
                 start_sample = offset // 2
                 end_sample = end // 2
@@ -482,7 +525,7 @@ class SessionService:
 
     # ── Background diarization: 잔여분만 처리 ────────────────────
 
-    async def _run_diarization_remaining(self, ssid: str, pcm_data: bytes, sample_rate: int) -> None:
+    async def _run_diarization_remaining(self, ssid: str, sample_rate: int) -> None:
         """stop 시 호출: 이미 처리된 에폭 이후의 잔여 오디오만 diarize한다."""
         try:
             diarization_source = self._get_diar_source()
@@ -501,15 +544,18 @@ class SessionService:
 
                 prev_epochs = await self.store.get_diar_epochs(ssid)
                 interval = self.settings.diar_chunk_interval_sec
-                total_duration = len(pcm_data) / 2 / sample_rate
+                total_pcm_bytes = await self.store.get_pcm_length(ssid)
+                total_duration = total_pcm_bytes / 2 / sample_rate
 
                 if interval > 0 and prev_epochs:
                     completed_epochs = len(prev_epochs)
                     remaining_start_sec = completed_epochs * interval
                     remaining_start_byte = int(remaining_start_sec * sample_rate * 2)
 
-                    if remaining_start_byte < len(pcm_data):
-                        remaining_pcm = pcm_data[remaining_start_byte:]
+                    if remaining_start_byte < total_pcm_bytes:
+                        remaining_pcm = await self.store.get_pcm_slice(
+                            ssid, remaining_start_byte, total_pcm_bytes,
+                        )
                         remaining_duration = len(remaining_pcm) / 2 / sample_rate
 
                         logger.info(
@@ -523,6 +569,7 @@ class SessionService:
                             diarization_source, token, remaining_pcm,
                             sample_rate, remaining_start_sec,
                         )
+                        del remaining_pcm  # 즉시 해제
 
                         speaker_map = self._resolve_speaker_map(
                             prev_epochs, turns, embeddings, completed_epochs,
@@ -656,13 +703,13 @@ class SessionService:
         if diar_status not in ("done", "error"):
             wav_path = st.get("audio_path", "")
             if not wav_path:
-                # Build WAV from disk PCM
-                pcm_data = await self.store.get_pcm(ssid)
-                if pcm_data:
+                # Build WAV from disk PCM (스트리밍)
+                pcm_len = await self.store.get_pcm_length(ssid)
+                if pcm_len > 0:
                     audio_dir = self.settings.audio_data_dir
                     os.makedirs(audio_dir, exist_ok=True)
                     wav_path = os.path.join(audio_dir, f"{ssid}.wav")
-                    self._write_wav(wav_path, pcm_data, sample_rate)
+                    await self._write_wav_from_disk(wav_path, ssid, pcm_len, sample_rate)
 
             diarization_source = self._get_diar_source()
 
@@ -690,8 +737,13 @@ class SessionService:
                     "text": p["text"],
                 })
 
-        pcm_len = await self.store.get_pcm_length(ssid)
-        audio_duration_sec = round(pcm_len / 2 / sample_rate, 2) if pcm_len else 0.0
+        pcm_len_final = await self.store.get_pcm_length(ssid)
+        audio_duration_sec = round(pcm_len_final / 2 / sample_rate, 2) if pcm_len_final else 0.0
+
+        # finalize 완료 후 세션 오디오 파일 정리
+        await self.store.delete_session_files(ssid)
+        # background task도 정리
+        self._background_tasks.pop(ssid, None)
 
         return {
             "ssid": ssid,
