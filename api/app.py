@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import os
@@ -22,6 +23,21 @@ app.mount("/ui", StaticFiles(directory="ui", html=True), name="ui")
 _start_ts: float = time.time()
 
 
+async def _periodic_orphan_cleanup(store: RedisStore, interval_sec: int = 3600) -> None:
+    """주기적으로 orphan 오디오 파일을 정리하는 background task."""
+    while True:
+        await asyncio.sleep(interval_sec)
+        try:
+            deleted = await store.cleanup_orphan_files()
+            if deleted:
+                import logging
+                logging.getLogger("qwen3-asr.cleanup").info(
+                    "Periodic cleanup: deleted %d orphan files", deleted,
+                )
+        except Exception:
+            pass
+
+
 @app.on_event("startup")
 async def startup():
     global _start_ts
@@ -30,10 +46,14 @@ async def startup():
     store = await RedisStore.from_url(settings.redis_url)
     app.state.store = store
     app.state.session_service = SessionService(store)
+    app.state._cleanup_task = asyncio.create_task(_periodic_orphan_cleanup(store))
 
 
 @app.on_event("shutdown")
 async def shutdown():
+    cleanup_task = getattr(app.state, "_cleanup_task", None)
+    if cleanup_task:
+        cleanup_task.cancel()
     svc = getattr(app.state, "session_service", None)
     if svc:
         await svc.close()
