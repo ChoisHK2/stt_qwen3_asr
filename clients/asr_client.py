@@ -18,10 +18,10 @@ logger = logging.getLogger("qwen3-asr.asr_client")
 # Qwen3-ASR 모델 출력에서 언어와 텍스트를 추출하는 정규식
 _LANG_RE = re.compile(r"<\|([^|]+)\|>")
 _TEXT_RE = re.compile(r"<\|transcription\|>(.*?)(?:<\|/?|$)", re.DOTALL)
-# "language Korean", "Language: English" 등 모델이 삽입하는 잔여 언어 태그
-_LANG_TEXT_RE = re.compile(
-    r"(?i)\blanguage\s*:?\s*"
-    r"(?:Korean|English|Chinese|Japanese|French|German|Spanish|"
+# "language Korean", "Language: English", "lang Korean" 등 모델이 삽입하는 잔여 언어 태그
+# NOTE: 언어 이름 뒤에 \b 대신 lookahead 사용 — 한글 등 유니코드 word char 이 바로 이어질 때도 매칭
+_LANG_NAMES = (
+    r"Korean|English|Chinese|Japanese|French|German|Spanish|"
     r"Portuguese|Russian|Arabic|Hindi|Turkish|Vietnamese|Thai|"
     r"Indonesian|Malay|Italian|Dutch|Polish|Czech|Swedish|"
     r"Norwegian|Danish|Finnish|Hungarian|Romanian|Bulgarian|"
@@ -31,7 +31,12 @@ _LANG_TEXT_RE = re.compile(
     r"Lao|Mongolian|Tibetan|Georgian|Armenian|Azerbaijani|Kazakh|"
     r"Uzbek|Tagalog|Swahili|Afrikaans|Catalan|Galician|Basque|"
     r"Welsh|Irish|Icelandic|Maltese|Albanian|Macedonian|Serbian|"
-    r"Bosnian|Montenegrin|Nepali|Sinhala|auto)\b\s*",
+    r"Bosnian|Montenegrin|Nepali|Sinhala|auto"
+)
+_LANG_TEXT_RE = re.compile(
+    r"(?i)(?:^|\b)(?:language|lang)\s*:?\s*"
+    r"(?:" + _LANG_NAMES + r")"
+    r"(?=[^a-zA-Z]|$)\s*[,.:;]?\s*",
 )
 
 
