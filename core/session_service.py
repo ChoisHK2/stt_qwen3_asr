@@ -642,6 +642,19 @@ class SessionService:
     # ── Finalize ───────────────────────────────────────────────────
 
     async def finalize(self, ssid: str) -> dict[str, Any]:
+        # stop에서 시작된 background task(stt_final, diar) 완료 대기
+        pending_tasks = self._background_tasks.get(ssid, set())
+        if pending_tasks:
+            logger.info("Finalize waiting for %d background tasks for %s",
+                        len(pending_tasks), ssid[:8])
+            done, _ = await asyncio.wait(
+                pending_tasks,
+                timeout=self.settings.asr_timeout_sec * 2,
+            )
+            if len(done) < len(pending_tasks):
+                logger.warning("Finalize: %d tasks timed out for %s",
+                               len(pending_tasks) - len(done), ssid[:8])
+
         meta = await self.store.get_session_meta(ssid)
         sample_rate = int(meta.get("sample_rate", 16000))
         st = await self.store.get_status(ssid)
