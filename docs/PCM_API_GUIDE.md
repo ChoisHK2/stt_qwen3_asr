@@ -248,7 +248,7 @@ Content-Type: application/octet-stream
 POST /api/session/{session_id}/stop
 ```
 
-**설명**: 녹음을 중단하고, 백그라운드에서 STT 재처리(60초 단위)와 화자 분리를 시작합니다.
+**설명**: 녹음을 중단하고, 백그라운드에서 STT 재처리(60초 단위)와 화자 분리를 시작합니다. 인크리멘탈 화자 분리가 이미 진행 중이던 경우 추가 에폭 처리도 함께 수행됩니다.
 
 **Response** `200`:
 ```json
@@ -296,7 +296,9 @@ GET /api/session/{session_id}/status
 POST /api/session/{session_id}/finalize
 ```
 
-**설명**: STT + 화자 분리 결과를 합쳐 타임라인을 생성합니다. `status`에서 `stt_done=true && diar_done=true`일 때 호출하세요.
+**설명**: STT + 화자 분리 결과를 합쳐 타임라인을 생성합니다. `status`에서 `stt_done=true && diar_done=true`일 때 호출하세요. 미완료 백그라운드 태스크가 있으면 자동 대기합니다 (timeout: `ASR_TIMEOUT_SEC × 2`).
+
+정합 과정: 겹침 발화 해소 → 연속 동일 화자 병합 → 갭 채우기 → 시간 비율 텍스트 분배 → 긴 턴 분할 → 최종 병합
 
 **Response** `200`:
 ```json
@@ -587,6 +589,7 @@ function sendChunkWS(ws, ssid, seq, pcm16ArrayBuffer) {
 - `speaker`: `SPEAKER_00`, `SPEAKER_01`, ... 형식. 최대 감지 가능 화자 수는 모델에 따라 다름
 - `start`/`end`: 초 단위 시각
 - `text`: 해당 시간 구간의 인식 텍스트
+- 겹침 발화(동시 대화) 구간은 자동으로 해소되어, 각 단어는 정확히 하나의 화자에게만 배정됩니다
 
 ---
 

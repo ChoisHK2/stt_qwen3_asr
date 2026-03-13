@@ -19,7 +19,8 @@
 | **실시간 STT** | 오디오 청크 수신 즉시 텍스트 변환 (부분 결과) |
 | **고품질 STT 재처리** | 녹음 종료 후 60초 단위로 재처리하여 정확도 향상 |
 | **화자 분리** | pyannote 모델로 화자별 발화 구간 자동 인식 |
-| **인크리멘탈 화자 분리** | 10분 단위로 점진적 화자 분리 (긴 회의 대응) |
+| **인크리멘탈 화자 분리** | 10분 단위로 점진적 화자 분리 + 임베딩 기반 화자 매칭 |
+| **겹침 발화 해소** | 동시 발화(overlapping speech) 감지 시 문맥 기반 화자 배정 |
 | **화자-텍스트 매핑** | STT 결과와 화자 분리 결과를 시간축 기반으로 정합 |
 | **오디오 전처리** | DC 제거, 게인 조정, 노이즈 감소, 품질 지표 산출 |
 | **세션 관리** | 세션 생성/중단/재개/복구, 최대 2시간 녹음, 4시간 TTL |
@@ -137,18 +138,21 @@
 ① Stop 요청                    ② 백그라운드 처리              ③ Finalize
    POST /stop                     (자동 시작)                   POST /finalize
 
-   녹음 중단 ──────────▶ ┌── STT 재처리 (60초 단위) ──▶ ┌── ASR+Diar 정합
-                         │   전체 오디오를 60초씩         │   시간축 매핑
-                         │   분할하여 고품질 추론         │   화자별 텍스트 배정
-                         │                              │   갭 채우기
-                         ├── 화자 분리 ──────────────▶   │   연속 구간 병합
-                         │   pyannote 파이프라인          │
+   녹음 중단 ──────────▶ ┌── STT 재처리 (60초 단위) ──▶ ┌── 겹침 발화 해소
+                         │   전체 오디오를 60초씩         │   ASR+Diar 정합
+                         │   분할하여 고품질 추론         │   시간축 매핑
+                         │                              │   화자별 텍스트 배정
+                         ├── 화자 분리 ──────────────▶   │   갭 채우기
+                         │   pyannote 파이프라인          │   연속 구간 병합
                          │   화자 임베딩 + 클러스터링     ▼
                          └──────────────────────────  timeline[]
                                                        full_text
           status 폴링                                   diarization[]
           (2~3초 간격)
           stt_done? diar_done?
+
+   * finalize 호출 시 미완료 백그라운드 태스크가 있으면
+     자동 대기 (timeout: asr_timeout_sec × 2)
 ```
 
 ### 3.3 인크리멘탈 화자 분리
@@ -163,10 +167,13 @@
                   ▲               ▲               ▲
                   │               │               │
               diar 실행        diar 실행        diar 실행
+              + 임베딩 추출    + 임베딩 추출    + 임베딩 추출
               (백그라운드)      (백그라운드)      (백그라운드)
 
+  * 에폭 간 오버랩 없음 (임베딩 기반 매칭이므로 불필요)
   * 각 epoch의 화자 임베딩을 비교하여 동일 화자 매칭
-  * cosine similarity 기반 (threshold: 0.65)
+  * cosine similarity 기반 (threshold: 0.45)
+  * 동시 실행 제한: MAX_CONCURRENT_DIAR (기본 2)
 ```
 
 ---
@@ -248,7 +255,7 @@ stt_qwen3_asr/
 | 세션 생성 | `start_session()` | UUID 발급, Redis에 메타데이터 저장 |
 | 청크 수신 | `ingest_chunk()` | seq 중복 체크 → 디스크 저장 → 전처리 → 실시간 STT |
 | 녹음 중단 | `stop_session()` | WAV 생성, 백그라운드 STT+Diar 시작 |
-| 결과 생성 | `finalize()` | STT + Diar 정합 → timeline 생성 |
+| 결과 생성 | `finalize()` | 백그라운드 태스크 대기 → STT + Diar 정합 → timeline 생성 |
 | 상태 조회 | `status()` | 처리 진행 상태 반환 |
 | 세션 재개 | `resume_session()` | 중단된 세션 녹음 재개 |
 | 부분 결과 | `get_partial_results()` | 중간 결과 반환 |
@@ -256,6 +263,11 @@ stt_qwen3_asr/
 **동시성 제어**:
 - ASR 요청: `asyncio.Semaphore(MAX_CONCURRENT_ASR)` — 기본 32
 - Diarization: `asyncio.Semaphore(MAX_CONCURRENT_DIAR)` — 기본 2
+
+**백그라운드 태스크 관리**:
+- `_track_task()`: 세션별 비동기 태스크 등록 (STT 재처리, 인크리멘탈 Diar)
+- `cancel_session_tasks()`: 세션 취소 시 태스크 정리
+- `finalize()` 호출 시 미완료 태스크 자동 대기 (timeout: `asr_timeout_sec × 2`)
 
 ### 5.2 ASR Client (음성 인식)
 
@@ -283,11 +295,17 @@ WAV 오디오 → pyannote Pipeline → DiarTurn(speaker, start, end)[]
                                       │
                                       ▼
                                화자 임베딩 추출
+                               (centroid embedding 또는 별도 추출)
                                       │
                                       ▼
                                epoch 간 화자 매칭
-                               (cosine similarity)
+                               (cosine similarity ≥ 0.45)
 ```
+
+**인크리멘탈 모드 (에폭 단위)**:
+- `diarize_epoch()`: 단일 에폭 diarize + 임베딩 추출
+- `match_speakers_by_embedding()`: 이전/현재 에폭 화자 임베딩 비교
+- `extract_speaker_embeddings()`: 각 화자의 발화 구간에서 임베딩 벡터 추출 후 평균
 
 ### 5.4 Matching Engine (정합 엔진)
 
@@ -304,12 +322,22 @@ Timeline:  SPEAKER_00: "안녕하세요 오늘"      [0.0s ~ 3.5s]
            SPEAKER_01: "회의를..."            [3.8s ~ 7.2s]
 ```
 
-정합 알고리즘:
-1. 연속 동일 화자 Diar 세그먼트 병합
-2. 갭 구간 인접 화자에 할당
-3. ASR 텍스트를 시간 오버랩 비율로 화자에 분배
-4. 15초 초과 턴 분할
-5. 최종 연속 동일 화자 병합
+**정합 알고리즘 (6단계)**:
+
+1. **겹침 발화 해소** (`_resolve_overlapping_turns`)
+   - pyannote가 동시 발화를 감지하면 같은 시간대에 여러 화자 turn 반환
+   - ≤ 2초 짧은 겹침: 앞뒤 문맥(이전/다음 화자)을 확인하여 dominant 화자에 흡수
+   - 문맥상 유효한 짧은 발화는 시간 분할로 유지
+   - \> 2초 긴 겹침: 겹침 구간 중간점으로 분할
+2. **연속 동일 화자 Diar 세그먼트 병합** (`_merge_same_speaker_diar`)
+3. **갭 구간 인접 화자에 할당** (`_fill_diar_gaps`)
+4. **ASR 텍스트를 시간 비율로 화자에 분배** (`_distribute_words_by_time`)
+5. **15초 초과 턴 분할** (`_split_long_turns`)
+6. **최종 연속 동일 화자 병합** (`_final_merge_same_speaker`)
+
+**STT final ↔ chunk 정렬** (`align_final_with_chunks`):
+- STT 재처리 텍스트(고품질)를 실시간 chunk 시간 경계(고정밀)에 맞춰 재분할
+- SequenceMatcher로 final 단어 ↔ chunk 단어를 정렬하여 시간 상속
 
 ### 5.5 Audio Preprocessor (오디오 전처리)
 
@@ -347,7 +375,7 @@ DC Offset 제거 (평균값 차감)
 | `sess:{ssid}:seq` | Set | 4h | 수신된 seq 번호 (중복 체크) |
 | `sess:{ssid}:partial:{seq}` | String | 4h | 청크별 부분 STT 결과 |
 | `sess:{ssid}:stt_final` | String | 4h | 재처리 STT 결과 (JSON) |
-| `sess:{ssid}:diar_epochs` | String | 4h | 인크리멘탈 Diar 결과 |
+| `sess:{ssid}:diar_epochs` | String | 4h | 인크리멘탈 Diar 결과 (에폭별 turn + 임베딩) |
 | `sess:{ssid}:status` | String | 4h | 처리 상태 (recording/stopped/done) |
 
 ### 6.2 디스크 파일
@@ -379,13 +407,25 @@ DC Offset 제거 (평균값 차감)
 | `MAX_CONCURRENT_DIAR` | `2` | 화자분리 동시 실행 수 |
 | `PREPROCESS_ENABLED` | `true` | 오디오 전처리 활성화 |
 | `NOISE_REDUCTION_MODE` | `FAST` | 노이즈 감소 모드 (`FAST` / `QUALITY`) |
+| `ENABLE_VAD` | `false` | VAD(Voice Activity Detection) 활성화 |
+| `TARGET_RMS_DBFS` | `-20` | 게인 조정 목표 (dBFS) |
+| `LIMITER_PEAK_DBFS` | `-1` | 리미터 피크 임계값 (dBFS) |
+| `ASR_TIMEOUT_SEC` | `30` | ASR 요청 타임아웃 (초) |
 | `MAX_SESSION_AUDIO_SEC` | `7200` | 세션당 최대 오디오 (초, 2시간) |
 | `SESSION_TTL_SEC` | `14400` | 세션 만료 시간 (초, 4시간) |
 | `STT_FINAL_CHUNK_SEC` | `60` | 재처리 세그먼트 크기 (초) |
 | `DIAR_CHUNK_INTERVAL_SEC` | `600` | 인크리멘탈 Diar 주기 (초, 10분) |
+| `DIAR_EMBEDDING_THRESHOLD` | `0.45` | 화자 임베딩 cosine similarity 임계값 |
 | `DIAR_DEVICE` | `cpu` | 화자분리 디바이스 (`cpu` / `cuda` / `auto`) |
+| `OVERLAP_POLICY` | `dominant` | 겹침 발화 처리 정책 |
 | `MERGE_MODE` | `gap` | Diar 병합 모드 |
 | `MERGE_GAP_SEC` | `0.35` | 병합 갭 임계값 (초) |
+| `MIN_TURN_SEC` | `1.5` | 최소 턴 길이 (초) |
+| `MAX_TURN_SEC` | `15` | 최대 턴 길이 (초, 초과 시 분할) |
+| `MIN_WORDS_PER_TURN` | `3` | 턴 최소 단어 수 |
+| `FINALIZE_ASYNC_THRESHOLD_SEC` | `480` | 비동기 finalize 임계값 (초) |
+| `PARTIAL_MODE` | `on` | 실시간 부분 결과 모드 (`on` / `off`) |
+| `OVERLOAD_HTTP_CODE` | `429` | 과부하 시 HTTP 상태 코드 |
 
 ### 7.2 배포 프로파일
 
@@ -544,3 +584,9 @@ A: 세션은 TTL(4시간) 동안 유지됩니다. 동일 session_id로 resume �
 
 **Q: 실시간 STT 없이 녹음만 하고 나중에 결과를 받을 수 있나요?**
 A: `realtime=0`으로 청크를 전송하면 저장만 하고, stop → finalize에서 일괄 처리됩니다.
+
+**Q: 동일 화자가 다른 화자로 분리될 때는?**
+A: `DIAR_EMBEDDING_THRESHOLD`를 낮추면 더 관대하게 매칭합니다 (기본 0.45). 반대로 다른 화자가 같은 화자로 합쳐지면 값을 높이세요.
+
+**Q: 겹침 발화(동시 대화)는 어떻게 처리되나요?**
+A: pyannote가 감지한 겹침 구간에서 2초 이하의 짧은 발화는 문맥 기반으로 dominant 화자에 흡수하고, 2초 초과의 긴 겹침은 중간점으로 분할하여 각 화자에게 배분합니다.
