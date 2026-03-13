@@ -41,7 +41,7 @@ A. `MAX_CONCURRENT_ASR`, chunk 2s vs 5s, noise mode FAST/QUALITY, vLLM `--max-nu
 A. 온라인에서 모델 스냅샷(`/models`) + Docker 이미지 tar를 만든 뒤 오프라인 서버로 이동해 `docker load` 후 로컬 모델 경로로 실행합니다. API 이미지는 공통으로 유지하고, vLLM 런타임 이미지만 GPU 스택별로 분리하세요.
 
 ## Q13. 동일 화자가 다른 화자로 분리될 때는?
-A. `DIAR_EMBEDDING_THRESHOLD`를 낮추면 더 관대하게 매칭합니다 (기본 0.55). 반대로 다른 화자가 같은 화자로 합쳐지면 값을 높이세요. 인크리멘탈 모드에서는 에폭 간 cosine similarity로 화자를 매칭하므로, 이 임계값이 에폭 간 화자 일관성에 직접 영향을 줍니다.
+A. `DIAR_EMBEDDING_THRESHOLD`를 낮추면 더 관대하게 매칭합니다 (기본 0.45). 반대로 다른 화자가 같은 화자로 합쳐지면 값을 높이세요. 인크리멘탈 모드에서는 에폭 간 cosine similarity로 화자를 매칭하므로, 이 임계값이 에폭 간 화자 일관성에 직접 영향을 줍니다.
 
 ## Q14. 겹침 발화(동시 대화)는 어떻게 처리되나요?
 A. pyannote가 감지한 overlapping speech 구간에서:

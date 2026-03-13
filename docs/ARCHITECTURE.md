@@ -172,7 +172,7 @@
 
   * 에폭 간 오버랩 없음 (임베딩 기반 매칭이므로 불필요)
   * 각 epoch의 화자 임베딩을 비교하여 동일 화자 매칭
-  * cosine similarity 기반 (threshold: 0.55)
+  * cosine similarity 기반 (threshold: 0.45)
   * 동시 실행 제한: MAX_CONCURRENT_DIAR (기본 2)
 ```
 
@@ -299,7 +299,7 @@ WAV 오디오 → pyannote Pipeline → DiarTurn(speaker, start, end)[]
                                       │
                                       ▼
                                epoch 간 화자 매칭
-                               (cosine similarity ≥ 0.55)
+                               (cosine similarity ≥ 0.45)
 ```
 
 **인크리멘탈 모드 (에폭 단위)**:
@@ -415,14 +415,14 @@ DC Offset 제거 (평균값 차감)
 | `SESSION_TTL_SEC` | `14400` | 세션 만료 시간 (초, 4시간) |
 | `STT_FINAL_CHUNK_SEC` | `60` | 재처리 세그먼트 크기 (초) |
 | `DIAR_CHUNK_INTERVAL_SEC` | `600` | 인크리멘탈 Diar 주기 (초, 10분) |
-| `DIAR_EMBEDDING_THRESHOLD` | `0.55` | 화자 임베딩 cosine similarity 임계값 |
+| `DIAR_EMBEDDING_THRESHOLD` | `0.45` | 화자 임베딩 cosine similarity 임계값 |
 | `DIAR_DEVICE` | `cpu` | 화자분리 디바이스 (`cpu` / `cuda` / `auto`) |
 | `OVERLAP_POLICY` | `dominant` | 겹침 발화 처리 정책 |
 | `MERGE_MODE` | `gap` | Diar 병합 모드 |
 | `MERGE_GAP_SEC` | `0.35` | 병합 갭 임계값 (초) |
-| `MIN_TURN_SEC` | `0.4` | 최소 턴 길이 (초) |
+| `MIN_TURN_SEC` | `1.5` | 최소 턴 길이 (초) |
 | `MAX_TURN_SEC` | `15` | 최대 턴 길이 (초, 초과 시 분할) |
-| `MIN_WORDS_PER_TURN` | `1` | 턴 최소 단어 수 |
+| `MIN_WORDS_PER_TURN` | `3` | 턴 최소 단어 수 |
 | `FINALIZE_ASYNC_THRESHOLD_SEC` | `480` | 비동기 finalize 임계값 (초) |
 | `PARTIAL_MODE` | `on` | 실시간 부분 결과 모드 (`on` / `off`) |
 | `OVERLOAD_HTTP_CODE` | `429` | 과부하 시 HTTP 상태 코드 |
@@ -586,7 +586,7 @@ A: 세션은 TTL(4시간) 동안 유지됩니다. 동일 session_id로 resume �
 A: `realtime=0`으로 청크를 전송하면 저장만 하고, stop → finalize에서 일괄 처리됩니다.
 
 **Q: 동일 화자가 다른 화자로 분리될 때는?**
-A: `DIAR_EMBEDDING_THRESHOLD`를 낮추면 더 관대하게 매칭합니다 (기본 0.55). 반대로 다른 화자가 같은 화자로 합쳐지면 값을 높이세요.
+A: `DIAR_EMBEDDING_THRESHOLD`를 낮추면 더 관대하게 매칭합니다 (기본 0.45). 반대로 다른 화자가 같은 화자로 합쳐지면 값을 높이세요.
 
 **Q: 겹침 발화(동시 대화)는 어떻게 처리되나요?**
 A: pyannote가 감지한 겹침 구간에서 2초 이하의 짧은 발화는 문맥 기반으로 dominant 화자에 흡수하고, 2초 초과의 긴 겹침은 중간점으로 분할하여 각 화자에게 배분합니다.
