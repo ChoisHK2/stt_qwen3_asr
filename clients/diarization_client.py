@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import warnings
 import wave
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -9,6 +10,16 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from core.models import DiarTurn
+
+# ── pyannote 관련 불필요한 경고 억제 ──────────────────────────────
+# torchcodec 미설치 경고 (waveform dict 방식 사용 시 정상 작동)
+warnings.filterwarnings("ignore", message=".*torchcodec is not installed correctly.*")
+# TF32 비활성화 경고 (pyannote 재현성 위해 자동 비활성화, 정상 동작)
+warnings.filterwarnings("ignore", message=".*TensorFloat-32.*TF32.*")
+# std() degrees of freedom 경고 (짧은 오디오에서 발생, 무해)
+warnings.filterwarnings("ignore", message=".*std\\(\\): degrees of freedom is <= 0.*")
+# return_embeddings 미지원 경고 (community 모델, fallback 처리됨)
+warnings.filterwarnings("ignore", message=".*Ignoring unexpected keyword arguments: return_embeddings.*")
 
 logger = logging.getLogger("qwen3-asr.diarization")
 
@@ -67,6 +78,9 @@ def get_embedding_inference(device: str = "cpu"):
 
     diarization 파이프라인 내부의 임베딩 모델을 재사용한다.
     파이프라인이 없으면 None을 반환한다.
+
+    pyannote 4.x: _pipeline._embedding (PretrainedSpeakerEmbedding) 사용.
+    pyannote 3.x: _pipeline.embedding (Model 인스턴스) 사용.
     """
     global _embedding_inference
     if _embedding_inference is not None:
@@ -80,15 +94,61 @@ def get_embedding_inference(device: str = "cpu"):
         from pyannote.audio import Inference
         import torch
 
-        # 파이프라인 내부의 임베딩 모델 재사용
-        embedding_model = _pipeline.embedding
+        # pyannote 4.x: _embedding (private) → PretrainedSpeakerEmbedding 내부의 모델
+        embedding_model = None
+        if hasattr(_pipeline, "_embedding"):
+            pe = _pipeline._embedding
+            # PretrainedSpeakerEmbedding 내부의 실제 모델 추출
+            if hasattr(pe, "classifier_"):
+                embedding_model = pe.classifier_
+                logger.info("Using pipeline._embedding.classifier_ (pyannote 4.x)")
+            elif hasattr(pe, "model_"):
+                embedding_model = pe.model_
+                logger.info("Using pipeline._embedding.model_ (pyannote 4.x)")
+
+        # pyannote 3.x fallback: embedding (public) 속성
+        if embedding_model is None:
+            em = _pipeline.embedding
+            if hasattr(em, "to"):
+                embedding_model = em
+                logger.info("Using pipeline.embedding (pyannote 3.x)")
+
+        if embedding_model is None:
+            logger.warning("Cannot extract embedding model from pipeline, "
+                           "embedding-based speaker matching disabled")
+            return None
+
         _embedding_inference = Inference(embedding_model, window="whole")
         _embedding_inference.to(torch.device(device))
-        logger.info("Embedding inference loaded from pipeline's internal model")
+        logger.info("Embedding inference loaded successfully")
         return _embedding_inference
     except Exception as e:
         logger.warning("Failed to load embedding inference: %s", e)
         return None
+
+
+def _extract_annotation_and_embeddings(result):
+    """파이프라인 출력에서 Annotation과 speaker_embeddings를 추출한다.
+
+    pyannote 4.x: DiarizeOutput(speaker_diarization, exclusive_speaker_diarization, speaker_embeddings)
+    pyannote 3.x: Annotation 또는 (Annotation, centroids) 튜플
+    """
+    annotation = None
+    centroids = None
+
+    # pyannote 4.x: DiarizeOutput — speaker_embeddings 필드 직접 접근
+    if hasattr(result, "speaker_diarization") and hasattr(result, "speaker_embeddings"):
+        annotation = result.speaker_diarization
+        centroids = result.speaker_embeddings
+    # pyannote 3.x: (Annotation, centroids) 튜플
+    elif isinstance(result, tuple) and len(result) == 2:
+        annotation, centroids = result
+        annotation = getattr(annotation, "speaker_diarization", annotation)
+    # 단순 Annotation
+    else:
+        annotation = getattr(result, "speaker_diarization", result)
+
+    return annotation, centroids
 
 
 def _diarize_waveform(
@@ -97,63 +157,39 @@ def _diarize_waveform(
     """단일 waveform tensor를 diarize한다.
 
     return_embeddings=True이면 (turns, {speaker: centroid_embedding}) 튜플을 반환한다.
-    pyannote 3.0+의 return_embeddings 파라미터를 활용하여
-    파이프라인 한 번 실행으로 centroid 임베딩까지 추출한다.
+    pyannote 4.x: DiarizeOutput.speaker_embeddings에서 직접 추출.
+    pyannote 3.x: return_embeddings 파라미터 또는 별도 추출 fallback.
     """
     pipeline = _pipeline
     if not pipeline:
         raise RuntimeError("Diarization pipeline not loaded. Call load() first.")
 
     audio_input = {"waveform": waveform, "sample_rate": sample_rate}
-
-    if return_embeddings:
-        try:
-            result = pipeline(audio_input, return_embeddings=True)
-            # return_embeddings=True → (Annotation, np.ndarray) 튜플
-            if isinstance(result, tuple) and len(result) == 2:
-                annotation, centroids = result
-                annotation = getattr(annotation, "speaker_diarization", annotation)
-                labels = list(annotation.labels())
-
-                turns: list[DiarTurn] = []
-                for seg, _, speaker in annotation.itertracks(yield_label=True):
-                    turns.append(DiarTurn(speaker=str(speaker), start=float(seg.start), end=float(seg.end)))
-
-                embeddings: dict[str, np.ndarray] = {}
-                if centroids is not None and len(centroids) > 0:
-                    for i, label in enumerate(labels):
-                        if i < len(centroids):
-                            embeddings[str(label)] = centroids[i].flatten()
-
-                logger.info("Diarized with embeddings: %d turns, %d speaker centroids",
-                           len(turns), len(embeddings))
-                return turns, embeddings
-            else:
-                # 구버전 pyannote — return_embeddings 미지원 fallback
-                logger.info("return_embeddings not supported, falling back to separate extraction")
-                annotation = getattr(result, "speaker_diarization", result)
-        except TypeError:
-            # return_embeddings 파라미터를 지원하지 않는 구버전
-            logger.info("return_embeddings parameter not supported, using fallback")
-            result = pipeline(audio_input)
-            annotation = getattr(result, "speaker_diarization", result)
-
-        turns = []
-        for seg, _, speaker in annotation.itertracks(yield_label=True):
-            turns.append(DiarTurn(speaker=str(speaker), start=float(seg.start), end=float(seg.end)))
-
-        # fallback: 별도 임베딩 추출
-        embeddings = extract_speaker_embeddings(waveform, sample_rate, turns)
-        return turns, embeddings
-
-    # return_embeddings=False: 기존 동작
     result = pipeline(audio_input)
-    annotation = getattr(result, "speaker_diarization", result)
+    annotation, centroids = _extract_annotation_and_embeddings(result)
 
-    turns = []
+    turns: list[DiarTurn] = []
     for seg, _, speaker in annotation.itertracks(yield_label=True):
         turns.append(DiarTurn(speaker=str(speaker), start=float(seg.start), end=float(seg.end)))
-    return turns
+
+    if not return_embeddings:
+        return turns
+
+    # 임베딩 추출: DiarizeOutput.speaker_embeddings (pyannote 4.x) 우선
+    embeddings: dict[str, np.ndarray] = {}
+    if centroids is not None and len(centroids) > 0:
+        labels = list(annotation.labels())
+        for i, label in enumerate(labels):
+            if i < len(centroids):
+                embeddings[str(label)] = np.asarray(centroids[i]).flatten()
+        logger.info("Diarized with embeddings: %d turns, %d speaker centroids",
+                     len(turns), len(embeddings))
+    else:
+        # fallback: 별도 임베딩 추출 (pyannote 3.x 또는 centroids 미제공 시)
+        logger.info("No centroids from pipeline output, extracting embeddings separately")
+        embeddings = extract_speaker_embeddings(waveform, sample_rate, turns)
+
+    return turns, embeddings
 
 
 @dataclass
