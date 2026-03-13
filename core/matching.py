@@ -498,10 +498,11 @@ def map_speakers(segments: list[ASRSegment], diar: list[DiarTurn]) -> list[Timel
                 text=text,
             ))
 
-    # merge → split → 재merge (split 후 동일 화자 연속 방지)
+    # merge → split → 재merge (split 후 동일 화자 연속 방지) → 최종 필터
     turns = merge_turns(turns)
     turns = _split_long_turns(turns, settings.max_turn_sec)
     turns = _final_merge_same_speaker(turns)
+    turns = _filter_short_turns(turns, settings.min_turn_sec, settings.min_words_per_turn)
 
     return turns
 
@@ -576,6 +577,58 @@ def _final_merge_same_speaker(turns: list[TimelineTurn]) -> list[TimelineTurn]:
     return merged
 
 
+def _filter_short_turns(
+    turns: list[TimelineTurn],
+    min_sec: float,
+    min_words: int,
+) -> list[TimelineTurn]:
+    """min_turn_sec 미만이고 min_words_per_turn 미만인 턴을 인접 턴에 흡수한다.
+
+    단순 삭제하면 텍스트가 유실되므로, 짧은 턴의 텍스트를 시간적으로
+    가장 가까운 인접 턴(직전 우선)에 병합한다.
+    """
+    if not turns:
+        return []
+
+    keep: list[bool] = [
+        (t.end - t.start) >= min_sec or len(t.text.split()) >= min_words
+        for t in turns
+    ]
+
+    # 모두 통과하면 그대로 반환
+    if all(keep):
+        return turns
+
+    result = list(turns)  # shallow copy for mutation
+
+    # 짧은 턴을 인접 턴에 흡수 (뒤에서부터 처리하여 인덱스 안정)
+    for i in range(len(result) - 1, -1, -1):
+        if keep[i]:
+            continue
+        short = result[i]
+        text = short.text.strip()
+        if not text:
+            result.pop(i)
+            keep.pop(i)
+            continue
+
+        # 직전 턴 우선, 없으면 직후 턴에 흡수
+        if i > 0 and keep[i - 1]:
+            result[i - 1].end = max(result[i - 1].end, short.end)
+            result[i - 1].text = f"{result[i - 1].text} {text}".strip()
+        elif i < len(result) - 1 and keep[i + 1]:
+            result[i + 1].start = min(result[i + 1].start, short.start)
+            result[i + 1].text = f"{text} {result[i + 1].text}".strip()
+        else:
+            # 양쪽 모두 짧은 턴 → 그냥 유지 (연속 짧은 턴은 드묾)
+            continue
+
+        result.pop(i)
+        keep.pop(i)
+
+    return result
+
+
 def merge_turns(turns: list[TimelineTurn]) -> list[TimelineTurn]:
     s = get_settings()
     if s.merge_mode == "none":
@@ -593,4 +646,4 @@ def merge_turns(turns: list[TimelineTurn]) -> list[TimelineTurn]:
             prev.text = f"{prev.text} {turn.text}".strip()
         else:
             merged.append(turn)
-    return [t for t in merged if (t.end - t.start) >= s.min_turn_sec or len(t.text.split()) >= s.min_words_per_turn]
+    return _filter_short_turns(merged, s.min_turn_sec, s.min_words_per_turn)
