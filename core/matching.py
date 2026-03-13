@@ -267,6 +267,141 @@ def _merge_same_speaker_diar(diar: list[DiarTurn]) -> list[DiarTurn]:
     return merged
 
 
+def _resolve_overlapping_turns(diar: list[DiarTurn], short_threshold: float = 2.0) -> list[DiarTurn]:
+    """겹치는 diar turn을 해소한다.
+
+    pyannote는 동시 발화(overlapping speech)를 감지하여 같은 시간대에
+    여러 화자의 turn을 반환할 수 있다. 이를 그대로 사용하면 같은 단어가
+    여러 화자에게 중복 분배된다.
+
+    전략:
+    - 2초 이하의 짧은 발화가 다른 화자와 겹치면, 앞뒤 문맥(이전/다음 turn의
+      화자)을 보고 dominant 화자에게 흡수시킨다.
+    - 2초 초과의 긴 겹침은 시간 중간점으로 분할하여 각 화자에게 배분한다.
+    """
+    if len(diar) <= 1:
+        return diar
+
+    sorted_diar = sorted(diar, key=lambda d: d.start)
+
+    # 겹침이 있는지 빠른 체크
+    has_overlap = False
+    for i in range(len(sorted_diar) - 1):
+        if sorted_diar[i].end > sorted_diar[i + 1].start:
+            has_overlap = True
+            break
+    if not has_overlap:
+        return sorted_diar
+
+    # 겹치는 turn 해소
+    result: list[DiarTurn] = []
+    skip: set[int] = set()
+
+    for i, curr in enumerate(sorted_diar):
+        if i in skip:
+            continue
+
+        # 현재 turn과 겹치는 다음 turn들을 찾는다
+        overlaps: list[int] = []
+        for j in range(i + 1, len(sorted_diar)):
+            if j in skip:
+                continue
+            if sorted_diar[j].start < curr.end:
+                overlaps.append(j)
+            else:
+                break  # 정렬되어 있으므로 이후는 겹치지 않음
+
+        if not overlaps:
+            result.append(DiarTurn(speaker=curr.speaker, start=curr.start, end=curr.end))
+            continue
+
+        # 겹치는 turn들과 함께 처리
+        group = [curr] + [sorted_diar[j] for j in overlaps]
+
+        # 각 turn의 길이 계산
+        durations = [(t.end - t.start) for t in group]
+
+        # 이전/다음 non-overlapping turn의 화자 확인 (문맥)
+        prev_speaker = result[-1].speaker if result else None
+        next_speaker = None
+        for k in range(max(overlaps) + 1, len(sorted_diar)):
+            if k not in skip:
+                next_speaker = sorted_diar[k].speaker
+                break
+
+        # dominant 화자: 가장 긴 발화를 가진 화자
+        dominant_idx = durations.index(max(durations))
+        dominant = group[dominant_idx]
+
+        # 짧은 turn(≤ threshold)이 겹치면 문맥 기반으로 흡수
+        all_resolved = True
+        kept_turns: list[DiarTurn] = []
+
+        for gi, t in enumerate(group):
+            dur = durations[gi]
+            if gi == dominant_idx:
+                kept_turns.append(DiarTurn(speaker=t.speaker, start=t.start, end=t.end))
+                continue
+
+            if dur <= short_threshold:
+                # 짧은 발화: 앞뒤 문맥을 보고 dominant에 흡수할지 결정
+                # 앞뒤 화자가 이 짧은 turn과 같은 화자이면 유지
+                context_match = (t.speaker == prev_speaker or t.speaker == next_speaker)
+                if context_match and t.speaker != dominant.speaker:
+                    # 문맥상 이 화자가 실제로 있었을 가능성 → 겹침 구간만 정리
+                    ov_start = max(t.start, dominant.start)
+                    ov_end = min(t.end, dominant.end)
+                    mid = (ov_start + ov_end) / 2
+
+                    # 짧은 turn을 겹치지 않는 부분만 남김
+                    if t.start < mid:
+                        kept_turns.append(DiarTurn(speaker=t.speaker, start=t.start, end=mid))
+                    if mid < t.end:
+                        # dominant의 시작을 mid로 조정 (아래에서 처리)
+                        pass
+                else:
+                    # dominant에 흡수 (짧은 발화 제거)
+                    logger.debug(
+                        "Absorbing short overlap: %s [%.1f-%.1f] (%.1fs) into %s",
+                        t.speaker, t.start, t.end, dur, dominant.speaker,
+                    )
+            else:
+                # 긴 겹침: 시간 중간점으로 분할
+                all_resolved = False
+                ov_start = max(t.start, dominant.start)
+                ov_end = min(t.end, dominant.end)
+                mid = (ov_start + ov_end) / 2
+
+                # 각자 겹치지 않는 영역 유지
+                if t.start < mid:
+                    kept_turns.append(DiarTurn(speaker=t.speaker, start=t.start, end=mid))
+                if mid < t.end:
+                    kept_turns.append(DiarTurn(speaker=t.speaker, start=mid, end=t.end))
+
+        # dominant turn의 시간 조정: 다른 kept_turns과 겹치지 않도록
+        for kt in kept_turns:
+            if kt.speaker == dominant.speaker:
+                continue
+            # dominant와 겹치는 부분 조정
+            for dt in kept_turns:
+                if dt.speaker != dominant.speaker:
+                    continue
+                if dt.start < kt.end and dt.end > kt.start:
+                    # 겹침 해소: dominant의 겹치는 부분 제거
+                    if dt.start < kt.start:
+                        dt.end = min(dt.end, kt.start)
+                    elif dt.end > kt.end:
+                        dt.start = max(dt.start, kt.end)
+
+        result.extend(sorted(kept_turns, key=lambda t: t.start))
+        skip.update(overlaps)
+
+    # 빈 turn 제거 및 정렬
+    result = [t for t in result if t.end > t.start + 0.01]
+    result.sort(key=lambda t: t.start)
+    return result
+
+
 def _fill_diar_gaps(diar: list[DiarTurn], audio_end: float) -> list[DiarTurn]:
     """diar turn 사이의 갭을 앞뒤 화자에게 할당하여 텍스트 누락을 방지한다.
 
@@ -320,16 +455,19 @@ def map_speakers(segments: list[ASRSegment], diar: list[DiarTurn]) -> list[Timel
     if not segments:
         return []
 
-    # 1) 연속 동일 화자 병합
-    merged_diar = _merge_same_speaker_diar(diar)
+    # 1) 겹치는 turn 해소 (pyannote의 overlapping speech 처리)
+    resolved_diar = _resolve_overlapping_turns(diar)
 
-    # 2) 갭 채우기 (오디오 끝 시간 = 마지막 ASR 세그먼트 끝)
+    # 2) 연속 동일 화자 병합
+    merged_diar = _merge_same_speaker_diar(resolved_diar)
+
+    # 3) 갭 채우기 (오디오 끝 시간 = 마지막 ASR 세그먼트 끝)
     audio_end = max(seg.end for seg in segments)
     filled_diar = _fill_diar_gaps(merged_diar, audio_end)
 
     logger.info(
-        "Diar preprocessing: %d raw → %d merged → %d gap-filled turns",
-        len(diar), len(merged_diar), len(filled_diar),
+        "Diar preprocessing: %d raw → %d resolved → %d merged → %d gap-filled turns",
+        len(diar), len(resolved_diar), len(merged_diar), len(filled_diar),
     )
 
     # 3) diar turn 기준으로 텍스트 분배
