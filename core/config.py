@@ -20,7 +20,7 @@ class Settings:
     limiter_peak_dbfs: float = -1.0
     vllm_base_url: str = "http://localhost:8001"
     vllm_model: str = "Qwen/Qwen3-ASR-0.6B"
-    asr_timeout_sec: int = 60
+    asr_timeout_sec: int = 120
     pyannote_model: str = "pyannote/speaker-diarization-community-1"
     pyannote_local_path: str = "/app/models/pyannote/speaker-diarization-community-1"
     pyannote_token: str | None = None
@@ -65,7 +65,7 @@ def get_settings() -> Settings:
         limiter_peak_dbfs=float(os.getenv("LIMITER_PEAK_DBFS", "-1")),
         vllm_base_url=os.getenv("VLLM_BASE_URL", "http://localhost:8001"),
         vllm_model=os.getenv("VLLM_MODEL", "Qwen/Qwen3-ASR-0.6B"),
-        asr_timeout_sec=int(os.getenv("ASR_TIMEOUT_SEC", "60")),
+        asr_timeout_sec=int(os.getenv("ASR_TIMEOUT_SEC", "120")),
         pyannote_model=os.getenv("PYANNOTE_MODEL", "pyannote/speaker-diarization-community-1"),
         pyannote_local_path=os.getenv("PYANNOTE_LOCAL_PATH", "/app/models/pyannote/speaker-diarization-community-1"),
         pyannote_token=os.getenv("PYANNOTE_TOKEN") or None,
