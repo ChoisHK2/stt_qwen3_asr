@@ -488,32 +488,33 @@ class SessionService:
                 await self.store.set_status(ssid, {"stt_final_status": "done"})
                 return
 
-            final_items: list[dict[str, Any]] = []
+            # 청크 목록 생성
+            chunks: list[tuple[int, int]] = []
             offset = 0
             while offset < total_bytes:
                 end = min(offset + segment_bytes, total_bytes)
-                segment_pcm = await self.store.get_pcm_slice(ssid, offset, end)
+                chunks.append((offset, end))
+                offset = end
 
-                start_sample = offset // 2
-                end_sample = end // 2
-                start_ms = int(start_sample * 1000 / sample_rate)
-                end_ms = int(end_sample * 1000 / sample_rate)
-
+            async def _transcribe_chunk(chunk_offset: int, chunk_end: int) -> dict[str, Any]:
+                segment_pcm = await self.store.get_pcm_slice(ssid, chunk_offset, chunk_end)
+                start_ms = int((chunk_offset // 2) * 1000 / sample_rate)
+                end_ms = int((chunk_end // 2) * 1000 / sample_rate)
                 audio = np.frombuffer(segment_pcm, dtype="<i2").astype(np.float32) / 32768.0
                 segs, _err = await self.asr.transcribe_partial(audio, sample_rate)
                 text = " ".join(s.text for s in segs).strip()
+                return {"start_ms": start_ms, "end_ms": end_ms, "text": text}
 
-                final_items.append({
-                    "start_ms": start_ms,
-                    "end_ms": end_ms,
-                    "text": text,
-                })
-                offset = end
+            # 모든 청크를 병렬로 처리 (semaphore가 동시 요청 수 제한)
+            results = await asyncio.gather(
+                *[_transcribe_chunk(o, e) for o, e in chunks],
+            )
+            final_items = list(results)
 
             await self.store.set_stt_final(ssid, final_items)
             await self.store.set_status(ssid, {"stt_final_status": "done"})
             logger.info(
-                "STT final done for %s: %d segments (%ds each)",
+                "STT final done for %s: %d segments (%ds each, parallel)",
                 ssid[:8], len(final_items), self.settings.stt_final_chunk_sec,
             )
         except Exception as e:
