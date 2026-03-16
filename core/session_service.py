@@ -313,7 +313,7 @@ class SessionService:
                 )
 
                 prev_epochs = await self.store.get_diar_epochs(ssid)
-                speaker_map = self._resolve_speaker_map(
+                speaker_map, updated_embeddings = self._resolve_speaker_map(
                     prev_epochs, turns, embeddings, epoch_idx,
                 )
 
@@ -326,10 +326,10 @@ class SessionService:
                         "end": t.end + offset_sec,
                     })
 
-                global_embeddings = {}
-                for local_spk, emb in embeddings.items():
-                    global_spk = speaker_map.get(local_spk, local_spk)
-                    global_embeddings[global_spk] = emb.tolist()
+                # EMA 누적 임베딩 사용 (단일 에폭 임베딩 대신)
+                global_embeddings = {
+                    spk: emb.tolist() for spk, emb in updated_embeddings.items()
+                }
 
                 epoch_data = {
                     "epoch_idx": epoch_idx,
@@ -375,8 +375,14 @@ class SessionService:
         curr_turns: list,
         curr_embeddings: dict,
         epoch_idx: int,
-    ) -> dict[str, str]:
-        """이전 에폭의 임베딩과 비교하여 화자 매핑을 결정한다."""
+    ) -> tuple[dict[str, str], dict[str, np.ndarray]]:
+        """이전 에폭의 임베딩과 비교하여 화자 매핑을 결정한다.
+
+        Returns:
+            (speaker_map, updated_embeddings) 튜플.
+            speaker_map: curr_local → global 매핑.
+            updated_embeddings: EMA 누적 업데이트된 글로벌 임베딩.
+        """
         all_prev_embeddings: dict[str, np.ndarray] = {}
         for ep in reversed(prev_epochs):
             for spk, emb_list in ep.get("speaker_embeddings", {}).items():
@@ -391,9 +397,9 @@ class SessionService:
                 if t.speaker not in speaker_map:
                     speaker_map[t.speaker] = f"SPEAKER_{counter:02d}"
                     counter += 1
-            return speaker_map
+            return speaker_map, dict(all_prev_embeddings)
 
-        embedding_map = match_speakers_by_embedding(
+        embedding_map, updated_embeddings = match_speakers_by_embedding(
             all_prev_embeddings,
             curr_embeddings,
             threshold=self.settings.diar_embedding_threshold,
@@ -411,10 +417,14 @@ class SessionService:
         speaker_map = dict(embedding_map)
         for t in curr_turns:
             if t.speaker not in speaker_map:
-                speaker_map[t.speaker] = f"SPEAKER_{max_idx:02d}"
+                new_global = f"SPEAKER_{max_idx:02d}"
+                speaker_map[t.speaker] = new_global
+                # 새 화자의 임베딩도 누적 임베딩에 추가
+                if t.speaker in curr_embeddings:
+                    updated_embeddings[new_global] = curr_embeddings[t.speaker].copy()
                 max_idx += 1
 
-        return speaker_map
+        return speaker_map, updated_embeddings
 
     # ── Stop: WAV 저장 + 잔여분 diar & stt_final 시작 ──────────
 
@@ -572,7 +582,7 @@ class SessionService:
                         )
                         del remaining_pcm  # 즉시 해제
 
-                        speaker_map = self._resolve_speaker_map(
+                        speaker_map, updated_embeddings = self._resolve_speaker_map(
                             prev_epochs, turns, embeddings, completed_epochs,
                         )
 
@@ -585,10 +595,10 @@ class SessionService:
                                 "end": t.end + remaining_start_sec,
                             })
 
-                        global_embeddings = {}
-                        for local_spk, emb in embeddings.items():
-                            global_spk = speaker_map.get(local_spk, local_spk)
-                            global_embeddings[global_spk] = emb.tolist()
+                        # EMA 누적 임베딩 사용
+                        global_embeddings = {
+                            spk: emb.tolist() for spk, emb in updated_embeddings.items()
+                        }
 
                         epoch_data = {
                             "epoch_idx": completed_epochs,
