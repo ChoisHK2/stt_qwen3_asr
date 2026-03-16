@@ -649,7 +649,7 @@ class SessionService:
                         len(pending_tasks), ssid[:8])
             done, _ = await asyncio.wait(
                 pending_tasks,
-                timeout=self.settings.asr_timeout_sec * 2,
+                timeout=self.settings.finalize_async_threshold_sec,
             )
             if len(done) < len(pending_tasks):
                 logger.warning("Finalize: %d tasks timed out for %s",
