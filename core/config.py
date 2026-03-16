@@ -16,7 +16,7 @@ class Settings:
     preprocess_enabled: bool = True
     noise_reduction_mode: str = "FAST"
     enable_vad: bool = False
-    target_rms_dbfs: float = -20.0
+    target_rms_dbfs: float = -15.0
     limiter_peak_dbfs: float = -1.0
     vllm_base_url: str = "http://localhost:8001"
     vllm_model: str = "Qwen/Qwen3-ASR-0.6B"
@@ -61,7 +61,7 @@ def get_settings() -> Settings:
         preprocess_enabled=_env_bool("PREPROCESS_ENABLED", True),
         noise_reduction_mode=os.getenv("NOISE_REDUCTION_MODE", "FAST"),
         enable_vad=_env_bool("ENABLE_VAD", False),
-        target_rms_dbfs=float(os.getenv("TARGET_RMS_DBFS", "-20")),
+        target_rms_dbfs=float(os.getenv("TARGET_RMS_DBFS", "-15")),
         limiter_peak_dbfs=float(os.getenv("LIMITER_PEAK_DBFS", "-1")),
         vllm_base_url=os.getenv("VLLM_BASE_URL", "http://localhost:8001"),
         vllm_model=os.getenv("VLLM_MODEL", "Qwen/Qwen3-ASR-0.6B"),
