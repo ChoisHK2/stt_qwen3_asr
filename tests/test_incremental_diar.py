@@ -27,9 +27,12 @@ def test_match_speakers_by_embedding_exact_match():
     prev = {"SPEAKER_00": emb_a, "SPEAKER_01": emb_b}
     curr = {"SPEAKER_0": emb_a, "SPEAKER_1": emb_b}
 
-    mapping = match_speakers_by_embedding(prev, curr, threshold=0.5)
+    mapping, updated = match_speakers_by_embedding(prev, curr, threshold=0.5)
     assert mapping["SPEAKER_0"] == "SPEAKER_00"
     assert mapping["SPEAKER_1"] == "SPEAKER_01"
+    # EMA 업데이트된 임베딩이 반환되어야 한다
+    assert "SPEAKER_00" in updated
+    assert "SPEAKER_01" in updated
 
 
 def test_match_speakers_by_embedding_no_match():
@@ -37,8 +40,10 @@ def test_match_speakers_by_embedding_no_match():
     prev = {"SPEAKER_00": np.array([1.0, 0.0, 0.0])}
     curr = {"SPEAKER_0": np.array([0.0, 1.0, 0.0])}  # orthogonal
 
-    mapping = match_speakers_by_embedding(prev, curr, threshold=0.5)
+    mapping, updated = match_speakers_by_embedding(prev, curr, threshold=0.5)
     assert len(mapping) == 0
+    # 매칭 실패 시 기존 임베딩 유지
+    assert "SPEAKER_00" in updated
 
 
 def test_match_speakers_by_embedding_partial_match():
@@ -49,7 +54,7 @@ def test_match_speakers_by_embedding_partial_match():
         "SPEAKER_1": np.array([0.0, 0.0, 1.0]),    # new speaker
     }
 
-    mapping = match_speakers_by_embedding(prev, curr, threshold=0.5)
+    mapping, updated = match_speakers_by_embedding(prev, curr, threshold=0.5)
     assert mapping.get("SPEAKER_0") == "SPEAKER_00"
     assert "SPEAKER_1" not in mapping
 
@@ -57,15 +62,30 @@ def test_match_speakers_by_embedding_partial_match():
 def test_match_speakers_empty_prev():
     """이전 에폭이 비어있으면 빈 매핑을 반환해야 한다."""
     curr = {"SPEAKER_0": np.array([1.0, 0.0])}
-    mapping = match_speakers_by_embedding({}, curr, threshold=0.5)
+    mapping, updated = match_speakers_by_embedding({}, curr, threshold=0.5)
     assert mapping == {}
+    assert updated == {}
 
 
 def test_match_speakers_empty_curr():
     """현재 에폭이 비어있으면 빈 매핑을 반환해야 한다."""
     prev = {"SPEAKER_00": np.array([1.0, 0.0])}
-    mapping = match_speakers_by_embedding(prev, {}, threshold=0.5)
+    mapping, updated = match_speakers_by_embedding(prev, {}, threshold=0.5)
     assert mapping == {}
+    assert "SPEAKER_00" in updated
+
+
+def test_match_speakers_ema_blending():
+    """EMA 누적으로 임베딩이 점진적으로 업데이트되어야 한다."""
+    prev = {"SPEAKER_00": np.array([1.0, 0.0, 0.0])}
+    curr = {"SPEAKER_0": np.array([0.9, 0.1, 0.0])}
+
+    mapping, updated = match_speakers_by_embedding(prev, curr, threshold=0.5, ema_alpha=0.3)
+    assert "SPEAKER_00" in mapping.values()
+    # EMA: (0.7 * [1,0,0] + 0.3 * [0.9,0.1,0]) = [0.97, 0.03, 0]
+    # L2 정규화 후에도 원래 방향에 가까워야 함
+    blended = updated["SPEAKER_00"]
+    assert blended[0] > blended[1]  # 여전히 첫 번째 차원이 지배적
 
 
 # ── Final merge same speaker ────────────────────────────────────
@@ -150,7 +170,7 @@ def test_config_diar_chunk_interval():
     from core.config import Settings
     s = Settings()
     assert s.diar_chunk_interval_sec == 600
-    assert s.diar_embedding_threshold == 0.65
+    assert s.diar_embedding_threshold == 0.45
 
 
 def test_config_diar_chunk_interval_custom():

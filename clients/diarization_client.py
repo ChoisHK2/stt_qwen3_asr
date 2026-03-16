@@ -261,14 +261,27 @@ def match_speakers_by_embedding(
     prev_embeddings: dict[str, np.ndarray],
     curr_embeddings: dict[str, np.ndarray],
     threshold: float = 0.65,
-) -> dict[str, str]:
+    ema_alpha: float = 0.3,
+) -> tuple[dict[str, str], dict[str, np.ndarray]]:
     """임베딩 cosine similarity로 이전/현재 에폭의 화자를 매칭한다.
 
+    매칭 성공 시 EMA(지수이동평균)로 임베딩을 누적 업데이트하여
+    단일 에폭에서 임베딩이 튀는 것을 방지한다.
+
+    Args:
+        prev_embeddings: 이전까지 누적된 글로벌 화자 임베딩
+        curr_embeddings: 현재 에폭의 로컬 화자 임베딩
+        threshold: 매칭 최소 cosine similarity
+        ema_alpha: 새 임베딩 반영 비율 (0~1). 작을수록 기존 임베딩 유지.
+
     Returns:
-        curr_local_speaker → prev_global_speaker 매핑
+        (mapping, updated_embeddings) 튜플.
+        mapping: curr_local_speaker → prev_global_speaker 매핑.
+        updated_embeddings: 매칭된 화자는 EMA 업데이트된 임베딩,
+                           매칭 안 된 이전 화자는 기존 임베딩 유지.
     """
     if not prev_embeddings or not curr_embeddings:
-        return {}
+        return {}, dict(prev_embeddings) if prev_embeddings else {}
 
     from scipy.spatial.distance import cdist
 
@@ -301,7 +314,23 @@ def match_speakers_by_embedding(
             used_prev.add(prev_spk)
             logger.info("Embedding match: %s → %s (similarity=%.3f)", curr_spk, prev_spk, sim)
 
-    return mapping
+    # EMA 누적: 매칭된 화자의 임베딩을 가중 평균으로 업데이트
+    updated: dict[str, np.ndarray] = {}
+    for spk, emb in prev_embeddings.items():
+        updated[spk] = emb.copy()
+
+    for curr_spk, prev_spk in mapping.items():
+        old = prev_embeddings[prev_spk]
+        new = curr_embeddings[curr_spk]
+        blended = (1.0 - ema_alpha) * old + ema_alpha * new
+        # L2 정규화하여 cosine similarity 계산 안정성 유지
+        norm = np.linalg.norm(blended)
+        if norm > 0:
+            blended = blended / norm
+        updated[prev_spk] = blended
+        logger.debug("EMA update %s: alpha=%.2f", prev_spk, ema_alpha)
+
+    return mapping, updated
 
 
 def _map_speakers_across_chunks(
