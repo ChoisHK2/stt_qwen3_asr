@@ -187,7 +187,8 @@ def _diarize_waveform(
     else:
         # fallback: 별도 임베딩 추출 (pyannote 3.x 또는 centroids 미제공 시)
         logger.info("No centroids from pipeline output, extracting embeddings separately")
-        embeddings = extract_speaker_embeddings(waveform, sample_rate, turns)
+        device = str(next(_pipeline.parameters()).device) if hasattr(_pipeline, "parameters") else "cpu"
+        embeddings = extract_speaker_embeddings(waveform, sample_rate, turns, device=device)
 
     return turns, embeddings
 
