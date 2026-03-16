@@ -35,7 +35,7 @@ class Settings:
     diar_chunk_interval_sec: int = 600  # 인크리멘탈 diar 주기(초, 기본 10분)
     diar_embedding_threshold: float = 0.45  # 화자 임베딩 cosine similarity 임계값
     stt_final_chunk_sec: int = 120  # stop 후 재처리 세그먼트 크기(초)
-    max_session_audio_sec: int = 7200  # 세션당 최대 오디오 길이(초)
+    max_session_audio_sec: int = 14400  # 세션당 최대 오디오 길이(초)
     finalize_async_threshold_sec: float = 480
     audio_data_dir: str = "data/audio"
     model_dir: str = "/app/models"
@@ -80,7 +80,7 @@ def get_settings() -> Settings:
         diar_chunk_interval_sec=int(os.getenv("DIAR_CHUNK_INTERVAL_SEC", "600")),
         diar_embedding_threshold=float(os.getenv("DIAR_EMBEDDING_THRESHOLD", "0.45")),
         stt_final_chunk_sec=int(os.getenv("STT_FINAL_CHUNK_SEC", "120")),
-        max_session_audio_sec=int(os.getenv("MAX_SESSION_AUDIO_SEC", "7200")),
+        max_session_audio_sec=int(os.getenv("MAX_SESSION_AUDIO_SEC", "14400")),
         finalize_async_threshold_sec=float(os.getenv("FINALIZE_ASYNC_THRESHOLD_SEC", "480")),
         audio_data_dir=os.getenv("AUDIO_DATA_DIR", "data/audio"),
         model_dir=os.getenv("MODEL_DIR", "/app/models"),
