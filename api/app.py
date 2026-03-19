@@ -15,8 +15,8 @@ from core.config import get_settings
 from core.session_service import SessionService
 from storage.redis_store import RedisStore
 
-app = FastAPI(title="Qwen3-ASR STT Service")
 settings = get_settings()
+app = FastAPI(title="Qwen3-ASR STT Service", root_path=settings.root_path)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 app.mount("/ui", StaticFiles(directory="ui", html=True), name="ui")
 

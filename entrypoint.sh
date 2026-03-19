@@ -109,12 +109,20 @@ echo "[entrypoint] vLLM process running"
 ) &
 
 ########################################
-# 6) FastAPI 시작 (포그라운드)
+# 6) FastAPI 시작 (포그라운드) - Gunicorn + Uvicorn worker
 ########################################
 APP_HOST="${APP_HOST:-0.0.0.0}"
 APP_PORT="${APP_PORT:-8000}"
+ROOT_PATH="${ROOT_PATH:-}"
+GUNICORN_WORKERS="${GUNICORN_WORKERS:-1}"
 
-UVICORN_ARGS="api.app:app --host ${APP_HOST} --port ${APP_PORT}"
+GUNICORN_ARGS="api.app:app --bind ${APP_HOST}:${APP_PORT} --worker-class uvicorn.workers.UvicornWorker --workers ${GUNICORN_WORKERS} --timeout 120 --graceful-timeout 30 --keep-alive 5"
+
+# Root path (쿠버네티스 Ingress prefix 지원)
+if [ -n "${ROOT_PATH}" ]; then
+  GUNICORN_ARGS="${GUNICORN_ARGS} --root-path ${ROOT_PATH}"
+  echo "[entrypoint] Root path: ${ROOT_PATH}"
+fi
 
 # HTTPS: SSL_KEYFILE + SSL_CERTFILE이 설정되면 활성화
 if [ -n "${SSL_KEYFILE:-}" ] && [ -n "${SSL_CERTFILE:-}" ]; then
@@ -126,10 +134,10 @@ if [ -n "${SSL_KEYFILE:-}" ] && [ -n "${SSL_CERTFILE:-}" ]; then
     echo "[entrypoint] ERROR: SSL_CERTFILE not found: ${SSL_CERTFILE}"
     exit 1
   fi
-  UVICORN_ARGS="${UVICORN_ARGS} --ssl-keyfile ${SSL_KEYFILE} --ssl-certfile ${SSL_CERTFILE}"
+  GUNICORN_ARGS="${GUNICORN_ARGS} --keyfile ${SSL_KEYFILE} --certfile ${SSL_CERTFILE}"
   echo "[entrypoint] Starting FastAPI (HTTPS) on ${APP_HOST}:${APP_PORT}"
 else
   echo "[entrypoint] Starting FastAPI (HTTP) on ${APP_HOST}:${APP_PORT}"
 fi
 
-exec uvicorn ${UVICORN_ARGS}
+exec gunicorn ${GUNICORN_ARGS}

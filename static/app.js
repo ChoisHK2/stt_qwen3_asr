@@ -2,7 +2,7 @@ const { createApp } = Vue;
 createApp({
   data() {
     return {
-      apiBase: window.location.origin,
+      apiBase: window.location.origin + window.location.pathname.replace(/\/ui\/?.*/i, "").replace(/\/+$/, ""),
       phase: "idle", // idle | guide | recording | processing | results
       mode: "",
       errorMsg: "",

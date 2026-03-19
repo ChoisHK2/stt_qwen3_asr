@@ -7,6 +7,8 @@ import os
 class Settings:
     app_host: str = "0.0.0.0"
     app_port: int = 8000
+    root_path: str = ""
+    gunicorn_workers: int = 1
     redis_url: str = "redis://localhost:6379/0"
     session_ttl_sec: int = 14400
     partial_mode: str = "on"
@@ -52,6 +54,8 @@ def get_settings() -> Settings:
     return Settings(
         app_host=os.getenv("APP_HOST", "0.0.0.0"),
         app_port=int(os.getenv("APP_PORT", "8000")),
+        root_path=os.getenv("ROOT_PATH", "").rstrip("/"),
+        gunicorn_workers=int(os.getenv("GUNICORN_WORKERS", "1")),
         redis_url=os.getenv("REDIS_URL", "redis://localhost:6379/0"),
         session_ttl_sec=int(os.getenv("SESSION_TTL_SEC", "14400")),
         partial_mode=os.getenv("PARTIAL_MODE", "on"),
