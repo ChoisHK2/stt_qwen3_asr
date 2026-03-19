@@ -108,7 +108,7 @@ services:
     build: .
     env_file: .env
     # compose 모드에서는 entrypoint의 Redis/vLLM 기동을 스킵
-    command: ["uvicorn", "api.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    command: ["gunicorn", "api.app:app", "--bind", "0.0.0.0:8000", "--worker-class", "uvicorn.workers.UvicornWorker", "--workers", "1", "--timeout", "120"]
     depends_on:
       redis:
         condition: service_started
